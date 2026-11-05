@@ -115,6 +115,7 @@ def streams_of(node):
             "spade_a": ei.get("spade_a"),
             "encrypt": ei.get("encrypt"),
             "kid": ei.get("kid"),
+            "vtype": meta.get("vtype") or "m4a",
         })
     items.sort(key=lambda x: -(x.get("bitrate") or 0))
     return tr, vm, items
