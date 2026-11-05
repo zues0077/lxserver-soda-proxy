@@ -21,9 +21,35 @@ def shell(cmd, timeout=60):
     return (r.stdout or "") + (r.stderr or "")
 
 
+_IS_ROOT = None
+
+
+def is_root():
+    """adbd 本身是否已经是 root（redroid 容器默认就是，真机 Magisk 不是）。"""
+    global _IS_ROOT
+    if _IS_ROOT is None:
+        try:
+            _IS_ROOT = shell("id -u", timeout=15).strip() == "0"
+        except Exception:
+            _IS_ROOT = False
+    return _IS_ROOT
+
+
 def su(cmd, timeout=60):
-    """以 root 执行（读 App 私有目录必须）。"""
-    return shell("su -c '%s'" % cmd.replace("'", "'\\''"), timeout=timeout)
+    """以 root 执行（读 App 私有目录必须）。
+
+    redroid 里未关闭的 adbd 本身就是 root，没有 `su` 这个二进制；
+    真机（Magisk）则是 uid=2000 需要走 su。两种情况都要能跑，
+    否则换宿主就会稳定报 `su: not found`。
+    """
+    if is_root():
+        return shell(cmd, timeout=timeout)
+    quoted = "su -c '%s'" % cmd.replace("'", "'\\''")
+    out = shell(quoted, timeout=timeout)
+    if "not found" in out or "inaccessible" in out:
+        # 万一 su 不存在但其实已经有权限，退回直接执行
+        return shell(cmd, timeout=timeout)
+    return out
 
 
 def tap(x, y, delay=1.0):
