@@ -68,8 +68,13 @@ def wait_track(track_id, timeout):
     return None
 
 
-def resolve(track_id, name=None, timeout=None):
-    """对外入口。返回 dict（见 README 的接口契约）。"""
+def resolve(track_id, name=None, timeout=None, fast=False):
+    """对外入口。返回 dict（见 README 的接口契约）。
+
+    fast=True 只查播放队列缓存就返回，不做搜索兜底。
+    这是给 lxserver 取流主链路用的：队列命中约 1~7 秒，搜索兜底要 60~90 秒，
+    主链路等不起，慢路径由后台预热单独跑（见 README「两条路径」）。
+    """
     track_id = str(track_id)
     timeout = timeout or config.RESOLVE_TIMEOUT
 
@@ -77,6 +82,10 @@ def resolve(track_id, name=None, timeout=None):
     node = find_in_queue(track_id)
     if node:
         return _result(track_id, node, "queue-cache")
+
+    if fast:
+        return {"ok": False, "trackId": track_id,
+                "error": "队列未命中（fast=1，不做搜索兜底）"}
 
     if not name:
         return {"ok": False, "trackId": track_id,
