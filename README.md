@@ -170,7 +170,7 @@ python -m soda_proxy.server
 | 宿主 | 结论 |
 |---|---|
 | **已 root 的 Android 平板/手机** | ✅ 可用（本项目所有实测都在真机上完成） |
-| **ARM 主机上的 redroid 容器** | ⏳ 理论可行（原生 arm64 无需转译），未实测 |
+| **ARM 主机上的 redroid 容器**（RK3399 / RK3566 / 树莓派 5 …） | ✅ 镜像原生 arm64，无需转译；**待实机验证**（脚本已备好，见下） |
 | **x86 主机上的 redroid**（NDK translation / Houdini） | ❌ **不可行**，见下 |
 
 ### 为什么 x86 容器不行（已实测两次，别再试）
@@ -186,16 +186,67 @@ python -m soda_proxy.server
 容器本身没问题（adb、root、`abilist` 含 `arm64-v8a`、`native.bridge=libnb.so` 都正常，
 APK 也能装成功），**卡点纯粹在 arm64 native 库转译**。
 
+### ARM 主机部署（redroid，一条命令体检 + 一步起容器）
+
+x86 的死因是**转译**，ARM 上不存在这个问题。
+`redroid/redroid:15.0.0-latest` 在 Docker Hub 上是**多架构 manifest**：
+
+```
+amd64 (883MB) / arm64 (821MB)
+```
+
+也就是说在 ARM 主机上 `docker pull` 拿到的就是原生 arm64 镜像，跑的是真 ARM 指令。
+
+**硬性前置（只有一条最关键：binderfs）**。redroid 启动时要 `mount -t binder`，
+只有 `binder` 设备文件不够；内核 4.4 一定没有 binderfs（5.0 才进主线），
+4.19 要看是不是 Android 分支反移植的。
+
+```bash
+# 1) 体检（只读）
+bash scripts/preflight_arm.sh
+
+# 2) 起 Android（原生 arm64）+ 装汽水 + 装 ADBKeyboard
+bash scripts/deploy_redroid.sh \
+  --apk /path/to/luna.apk \
+  --kbd /path/to/ADBKeyboard.apk \
+  --data /vol1/docker/redroid-soda/data
+
+# 3) 在容器里扫码登录一次（脚本末尾会打印具体命令）
+# 4) 起代理容器
+docker compose up -d --build
+```
+
+体检脚本会逐项给出 PASS/FAIL，判据是：`uname -m = aarch64`、`/proc/filesystems` 含
+`binder`、内存 ≥ 3.5G、有 docker。**有 FAIL 就别往下走**，换内核或换机器。
+
+几个容易踩的点：
+
+- **内存**：4G 起，8G 舒服。2G 板子跑不动（Android 15 系统本身 1.2~1.5G）。
+- **代理必须 host 网络**：redroid 的 adb 端口发布在 `127.0.0.1:5555`，桥接网络连不到。
+- **慢路径更慢**：平板搜索兜底 60~90 秒，A55/A72 上估计 3~5 分钟，
+  所以 `SODA_TIMEOUT` 要放大到 180，`SODA_PICK_WAIT` 放大到 10。
+- **redroid 里没有 `su`**：adbd 本身就是 root，代码已做 `id -u` 探测自动切换。
+- **坐标要按容器分辨率校准**：`config.py` 的坐标是按 1200×1848 标的，
+  部署脚本起容器时用的也是这个分辨率，就是为了直接复用。
+
 ---
 
 ## 与 lxserver 集成
 
-在 lxserver 的 `src/server/extraSources/soda.ts` 里加一条通道：
+已在 lxserver 落地（`src/server/extraSources/sodaProxy.ts` + `soda.ts`），通道顺序：
 
-1. `h5` / `seo` 都只给试听（或加密无密钥）时，请求 proxy 的 `/track/<id>?name=<歌名>`；
-2. 拿到 `streams` 后用户按需选档；
-3. `resolveAudioKey({spade_a})` → `registerSodaKey(trackId, hexKey)`；
-4. 走**现有的** `decryptAudioBufferAsync` 解密管线 —— **解密逻辑零改动**。
+```
+代理快速档（fast=1，1~7s） → 签名器 → 明文 h5/SEO
+      ↓ 都拿不到整曲
+   后台预热（慢路径 60~90s）→ 用户重试时命中缓存、秒出整曲
+```
+
+- 命中代理时 `source=proxy`，返回的 `main_url` + `spade_a` 直接进
+  **现有的** `decryptAudioBufferAsync` 解密管线（解密逻辑零改动）；
+- 主链路**只等** `fast=1`，绝不阻塞等 90 秒的搜索兜底；
+- 未配置 `qishui.proxyUrl` 时行为与之前完全一致（一次请求都不发）；
+- 配置入口在管理页「汽水签名器」下方的**取链代理**一行，也可用
+  `QISHUI_PROXY_URL` 环境变量。
 
 ---
 
@@ -230,11 +281,17 @@ APK 也能装成功），**卡点纯粹在 arm64 native 库转译**。
 ```
 soda_proxy/
   config.py     运行时配置（环境变量 + UI 坐标 + 超时）
-  device.py     adb 交互（串行锁、冷启动、搜索、输入）
+  device.py     adb 交互（串行锁、冷启动、搜索、输入、root 自适应）
   queue.py      读 cached_playable（拉库 + 解析 + 提流）
-  resolver.py   核心：track_id -> streams（队列命中 / 搜索兜底）
+  resolver.py   核心：track_id -> streams（队列命中 / 搜索兜底 / fast 只查队列）
   server.py     HTTP 服务（标准库）
 cli.py          命令行入口
+scripts/
+  preflight_arm.sh      ARM 主机体检（aarch64 / binderfs / 内存 / docker，只读）
+  deploy_redroid.sh     起 redroid + 装汽水 + 装 ADBKeyboard
+  docker-entrypoint.sh  代理容器入口（先 adb connect 再起服务）
+Dockerfile              代理镜像（python + adb，不含 Android）
+docker-compose.yml      redroid + 代理 的成对部署（代理用 host 网络）
 ```
 
 ---
