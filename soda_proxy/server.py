@@ -50,13 +50,14 @@ class Handler(BaseHTTPRequestHandler):
             if not track_id:
                 return self._send(400, {"ok": False, "error": "track_id 不能为空"})
             name = (qs.get("name") or [None])[0]
+            fast = (qs.get("fast") or ["0"])[0] in ("1", "true", "yes")
             timeout = qs.get("timeout")
             try:
                 timeout = int(timeout[0]) if timeout else None
             except ValueError:
                 timeout = None
             try:
-                res = _RESOLVE(track_id, name=name, timeout=timeout)
+                res = _RESOLVE(track_id, name=name, timeout=timeout, fast=fast)
             except Exception as e:              # 任何设备/ADB 异常都转成 502，别让服务挂掉
                 return self._send(502, {"ok": False, "trackId": track_id,
                                         "error": "%s: %s" % (type(e).__name__, e)})
