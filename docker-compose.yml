@@ -1,0 +1,29 @@
+# 汽水取链代理（ARM 主机：redroid + 代理容器）
+#
+# 两个服务必须成对存在：
+#   soda-android  提供一台 Android（原生 arm64），里面装着官方汽水 App
+#   soda-proxy    通过 adb 指挥那台 App 取链，对外暴露 HTTP
+#
+# 用法：
+#   1) 先跑体检：  bash scripts/preflight_arm.sh
+#   2) 起 Android：bash scripts/deploy_redroid.sh --apk /path/to/luna.apk --kbd /path/to/ADBKeyboard.apk
+#   3) 起代理：    docker compose up -d --build
+#
+# ⚠️ 代理必须用 host 网络：redroid 的 adb 端口发布在 127.0.0.1:5555，
+#    桥接网络里连不到（也避免了 port mapping 与 host 模式冲突）。
+services:
+  soda-proxy:
+    build: .
+    image: soda-proxy:local
+    container_name: soda-proxy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # 指向同机的 redroid
+      SODA_SERIAL: "127.0.0.1:5555"
+      # ARM 上搜索兜底比平板慢，预算放大到 180 秒
+      SODA_TIMEOUT: "180"
+      SODA_PICK_WAIT: "10"
+      SODA_WORK_DIR: "/tmp/soda-proxy"
+    volumes:
+      - ./data:/tmp/soda-proxy
