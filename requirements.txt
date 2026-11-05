@@ -1,0 +1,13 @@
+# soda-proxy 运行时依赖
+#
+# 本服务**不需要任何第三方 Python 包**：
+#   - SQLite 用标准库 sqlite3
+#   - HTTP 用标准库 http.server
+#   - 设备交互走外部 adb 命令
+#
+# 系统侧前置：
+#   1. adb（Android platform-tools）
+#   2. 一台已 root 的 Android 设备/容器，且已安装汽水音乐（com.luna.music）
+#   3. 设备上安装 ADBKeyboard（com.android.adbkeyboard），否则无法输入中文歌名
+#
+# Python >= 3.8
