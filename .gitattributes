@@ -1,0 +1,8 @@
+# shell 脚本在 Linux/容器里执行，必须保持 LF —— CRLF 会导致
+# `#!/usr/bin/env bash\r` 报 "bad interpreter: No such file or directory"
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+
+# Python 无所谓，但统一 LF 免得容器里 diff 花
+*.py text eol=lf
