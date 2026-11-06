@@ -7,3 +7,6 @@ out/
 *.json
 !package.json
 .DS_Store
+
+# 原始对话记录（含明文凭据，只在本地留存，绝不入库）
+_local-archive/
