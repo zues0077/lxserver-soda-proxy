@@ -198,7 +198,10 @@ redroid/redroid:15.0.0_64only-latest   →  amd64(730MB) / arm64(694MB)
 
 ---
 
-## 9. 踩过的坑（省你时间）
+## 9. 踩过的坑（速查表）
+
+> 完整版（56 条，按「数据 / 设备 / hook / 容器 / 代码 / 仓库」分层，每条带现象·真因·正确做法）
+> 见 **[docs/PITFALLS.md](PITFALLS.md)**。这里只放最贵的几条。
 
 | 坑 | 真相 |
 |---|---|
@@ -211,3 +214,5 @@ redroid/redroid:15.0.0_64only-latest   →  amd64(730MB) / arm64(694MB)
 | frida 一 hook 就闪退 | 别覆盖 `CronetUrlRequest.$init`；别用 `C.start.implementation + o.call(this)`（无限递归） |
 | redroid 里报 `su: not found` | adbd 本身就是 root，没有 su；代码已做 `id -u` 探测 |
 | `git reset --hard origin/main` 后文件消失 | fetch 失败时 `origin/main` 是**旧的**，reset 会把本地新提交一起抹掉（本次真的踩了，靠远端恢复） |
+| 抓包时列表只有 CONNECT | Cronet 不走系统代理，流量没进代理（不是证书问题） |
+| 后台预热成功但用户仍报试听 | 代理探测写在了「仅试听 5 分钟」负缓存之后，被旧判定挡住 |
