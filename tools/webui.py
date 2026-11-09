@@ -32,6 +32,8 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATE = {
@@ -297,6 +299,13 @@ details{margin-top:22px;border:1px solid var(--line);border-radius:12px;backgrou
 summary{cursor:pointer;padding:13px 18px;font-size:13px;color:var(--dim);user-select:none}
 summary:hover{color:var(--txt)}
 .adv{padding:0 18px 18px}
+.loginform{display:grid;grid-template-columns:1fr auto;gap:8px;margin:4px 0 10px}
+.loginform input{background:#14161c;border:1px solid var(--line);color:#e8eaf0;border-radius:8px;
+  padding:10px 12px;font-size:14px;outline:none}
+.loginform input:focus{border-color:#4c7dff}
+.loginform button.primary{background:#2563eb;color:#fff;border:none;border-radius:8px;
+  padding:10px 16px;font-size:14px;cursor:pointer}
+.loginform button.primary:active{opacity:.85}
 #scr{width:100%;max-width:360px;border-radius:8px;border:1px solid var(--line);display:block;cursor:crosshair;
   -webkit-user-drag:none;user-select:none;touch-action:none}
 .tag{font-size:11px;padding:1px 7px;border-radius:999px;background:#1e2530;color:var(--dim);margin-left:6px}
@@ -354,9 +363,11 @@ summary:hover{color:var(--txt)}
     <!-- 登录 -->
     <div class="card">
       <h2>登录方式</h2>
-      <div class="loginway">
-        <button onclick="showLogin('sms')"><span class="t">手机号登录</span><span class="d">短信验证码</span></button>
-        <button onclick="showLogin('qr')"><span class="t">扫码登录</span><span class="d">抖音扫码授权</span></button>
+      <div class="loginform">
+        <input id="phone" type="tel" inputmode="numeric" maxlength="11" placeholder="手机号（11 位）">
+        <button class="primary" onclick="sendCode()">获取验证码</button>
+        <input id="code" type="tel" inputmode="numeric" maxlength="6" placeholder="短信验证码">
+        <button class="primary" onclick="doLogin()">登录</button>
       </div>
       <div class="note" id="loginNote">
         当前账号已登录，无需再次登录。换号时才需要走下面的流程。
@@ -450,6 +461,40 @@ async function loadBenefit(force){
   }
 }
 
+function loginNote(msg, bad){
+  const n = $('loginNote');
+  if(!n) return;
+  n.textContent = msg;
+  n.style.color = bad ? '#f56c6c' : '';
+}
+function sendCode(){
+  const p = ($('phone').value || '').trim();
+  if(!/^1\d{10}$/.test(p)){ toast('手机号要 11 位'); loginNote('手机号要 11 位', true); return; }
+  loginNote('正在打开登录页、填手机号、点获取验证码，再自动过滑块…（约 30 秒）');
+  fetch('/api/login/send?phone=' + encodeURIComponent(p))
+    .then(r => r.json())
+    .then(d => {
+      const steps = (d.steps || []).join(' → ');
+      loginNote((d.ok ? '✅ 验证码已发送：' : '❌ 没通过：') + steps, !d.ok);
+      if(d.ok) { toast('已发送，去收短信'); }
+      else { toast('滑块没过，点「获取验证码」重试一次'); }
+      refreshScreen();
+    })
+    .catch(e => loginNote('调用失败：' + e, true));
+}
+function doLogin(){
+  const c = ($('code').value || '').trim();
+  if(!/^\d{4,6}$/.test(c)){ toast('验证码是 4~6 位数字'); loginNote('验证码是 4~6 位数字', true); return; }
+  loginNote('正在提交验证码…');
+  fetch('/api/login/code?code=' + encodeURIComponent(c))
+    .then(r => r.json())
+    .then(d => {
+      loginNote(d.ok ? '✅ 已提交，正在校验…' : '❌ ' + (d.error || '失败'), !d.ok);
+      setTimeout(loadSummary, 3000);
+      refreshScreen();
+    })
+    .catch(e => loginNote('调用失败：' + e, true));
+}
 function showLogin(kind){
   const n = $('loginNote');
   if (kind === 'qr') {
@@ -546,6 +591,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _proxy_proxy(self, path):
+        """把请求转给同机的取链代理（18090），它才有 captcha 识别与拖动逻辑。
+
+        两个容器是同镜像的不同服务，面板（18091）只负责界面。
+        """
+        import json as _json
+        url = 'http://host.docker.internal:18090' + path
+        try:
+            with urllib.request.urlopen(url, timeout=180) as r:
+                body = r.read().decode('utf-8', 'replace')
+                code = r.status
+        except urllib.error.HTTPError as e:
+            # 代理用 4xx 表示「滑块没通过」，body 里是详细 steps，必须透传出去，
+            # 否则面板只能显示一句 "HTTP Error 409"，看不出卡在哪一步。
+            body = e.read().decode('utf-8', 'replace')
+            code = e.code
+        except Exception as e:
+            return self._json({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)})
+        self.send_response(code)
+        payload = body.encode('utf-8')
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(payload)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(payload)
+
     def _json(self, obj):
         return self._send(200, json.dumps(obj, ensure_ascii=False), 'application/json; charset=utf-8')
 
@@ -597,6 +668,14 @@ class Handler(BaseHTTPRequestHandler):
             if png:
                 return self._send(200, png, 'image/png')
             return self._send(503, 'no screenshot')
+
+        if p == '/api/login/send':
+            phone = (q.get('phone') or [''])[0].strip()
+            return self._proxy_proxy('/login/send?phone=' + urllib.parse.quote(phone))
+
+        if p == '/api/login/code':
+            code = (q.get('code') or [''])[0].strip()
+            return self._proxy_proxy('/login/code?code=' + urllib.parse.quote(code))
 
         if p == '/login/open':
             # 把 App 切到登录页：热启动 + 点底部「我的」（未登录时「我的」就是登录入口）

@@ -12,6 +12,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends android-tools-adb ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# 滑块验证要在容器内本地算（截图不出容器，秒级完成），需要 PIL + numpy
+RUN pip install --no-cache-dir pillow numpy
+
 WORKDIR /app
 
 COPY soda_proxy ./soda_proxy

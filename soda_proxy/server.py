@@ -8,12 +8,13 @@
 注意：搜索兜底的请求要 60~90 秒，客户端超时必须设得比它长。
 """
 import json
+import re
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import device, resolver
+from . import captcha, config, device, resolver
 
 # 供外部注入（测试时可替换）
 _RESOLVE = resolver.resolve
@@ -62,6 +63,43 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 rooted = False
             return self._send(200, {"ok": True, "service": "soda-proxy", "root": rooted})
+
+        if path == "/login/send":
+            # 一条龙：打开登录页 -> 填手机号 -> 勾协议 -> 点获取验证码 -> 自动过滑块
+            phone = (qs.get("phone") or [""])[0].strip()
+            if not re.fullmatch(r"1\d{10}", phone):
+                return self._send(400, {"ok": False, "error": "手机号格式不对"})
+            with device._DEVICE_LOCK:
+                steps = []
+                device.shell("am start -n %s" % config.MAIN_ACTIVITY, timeout=40)
+                time.sleep(2.0)
+                device.tap(*config.ME_TAB, delay=2.5)
+                steps.append("打开登录页")
+                if not device.ensure_adb_ime():
+                    return self._send(500, {"ok": False, "error": "ADBKeyboard 未就绪，无法输入手机号",
+                                            "steps": steps})
+                device.tap(*config.PHONE_FIELD, delay=1.2)
+                device.input_text(phone)
+                steps.append("填手机号 " + phone)
+                device.tap(*config.AGREE_BOX, delay=1.2)
+                steps.append("勾选协议")
+                device.tap(*config.SEND_CODE_BTN, delay=4.0)
+                steps.append("点获取验证码")
+                ok, info = captcha.solve()
+                steps.append(("验证通过：" if ok else "验证失败：") + info)
+                return self._send(200 if ok else 409, {"ok": ok, "steps": steps})
+
+        if path == "/login/code":
+            code = (qs.get("code") or [""])[0].strip()
+            if not re.fullmatch(r"\d{4,6}", code):
+                return self._send(400, {"ok": False, "error": "验证码格式不对"})
+            with device._DEVICE_LOCK:
+                device.ensure_adb_ime()
+                device.tap(*config.CODE_FIELD, delay=1.2)
+                device.input_text(code)
+                device.tap(*config.LOGIN_BTN, delay=4.0)
+                time.sleep(2.0)
+                return self._send(200, {"ok": True, "steps": ["填验证码", "点登录"]})
 
         if path == "/queue":
             limit = int((qs.get("limit") or ["50"])[0])
