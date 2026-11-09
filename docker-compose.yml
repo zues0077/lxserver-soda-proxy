@@ -9,18 +9,24 @@
 #   2) 起 Android：bash scripts/deploy_redroid.sh --apk /path/to/luna.apk --kbd /path/to/ADBKeyboard.apk
 #   3) 起代理：    docker compose up -d --build
 #
-# ⚠️ 代理必须用 host 网络：redroid 的 adb 端口发布在 127.0.0.1:5555，
-#    桥接网络里连不到（也避免了 port mapping 与 host 模式冲突）。
+# 网络：两个服务都用**桥接 + 端口映射**（飞牛面板能看到端口）。
+# redroid 的 adb 发布在宿主机 0.0.0.0:5555，容器里通过 host.docker.internal:5555 访问
+# （extra_hosts 用 host-gateway 解析到宿主机网桥地址）。
 services:
   soda-proxy:
     build: .
     image: soda-proxy:local
     container_name: soda-proxy
     restart: unless-stopped
-    network_mode: host
+    # 用桥接 + 端口映射（飞牛面板才看得到端口）。
+    # 原来用 host 网络是为了能连 127.0.0.1:5555，现在改走 host.docker.internal。
+    ports:
+      - "18090:18090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      # 指向同机的 redroid
-      SODA_SERIAL: "127.0.0.1:5555"
+      # redroid 的 adb 发布在宿主机 0.0.0.0:5555，桥接网络用 host-gateway 访问
+      SODA_SERIAL: "host.docker.internal:5555"
       # ARM 上搜索兜底比平板慢，预算放大到 180 秒
       SODA_TIMEOUT: "180"
       SODA_PICK_WAIT: "10"
@@ -29,19 +35,21 @@ services:
       - ./data:/tmp/soda-proxy
 
   # 账号面板（浏览器里看账号/畅听权益/容器保活，还能远程点按）
-  # 同样用 host 网络：它要连 127.0.0.1:5555 上的 adb，也要访问 docker.sock 查容器状态。
   soda-webui:
     image: soda-proxy:local
     container_name: soda-webui
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "18091:18091"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - soda-proxy
     environment:
-      SODA_SERIAL: "127.0.0.1:5555"
+      SODA_SERIAL: "host.docker.internal:5555"
     volumes:
       # 查容器状态用；只读挂载足够
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # 宿主 docker CLI 是静态-ish（只依赖 libc），在 Debian slim 里可直接用
       - /usr/bin/docker:/usr/local/bin/docker:ro
-    command: ["python3", "-u", "/app/tools/webui.py", "--serial", "127.0.0.1:5555", "--port", "18091"]
+    command: ["python3", "-u", "/app/tools/webui.py", "--serial", "host.docker.internal:5555", "--port", "18091"]
