@@ -370,7 +370,7 @@ summary:hover{color:var(--txt)}
         <button class="primary" onclick="doLogin()">登录</button>
       </div>
       <div class="note" id="loginNote">
-        当前账号已登录，无需再次登录。换号时才需要走下面的流程。
+        下面是<b>最近一次登录</b>的账号记录（退出登录后该记录仍在，仅作参考）。要换号/首次登录，直接填手机号走下面的流程。
       </div>
       <div class="note" style="color:#8b93a7">
         说明：这版汽水<b>没有扫码登录</b>——它的登录页只有「手机号 + 短信验证码」，
@@ -433,7 +433,10 @@ async function loadSummary(){
     else { $('av').style.display='none'; }
 
     const pill = $('loginPill');
-    pill.innerHTML = '<i class="dot ' + (a.loggedIn?'ok':'bad') + '"></i><span>' + (a.loggedIn?'已登录':'未登录') + '</span>';
+    // 注意：这里读的是 account_db.login_info，是**本地最后一次登录的缓存**，
+  // 退出登录后它不会被清掉。所以标签写「最近账号」而不是「已登录」，
+  // 真实登录态以 App 界面为准（点「我的」看到登录页就是没登录）。
+  pill.innerHTML = '<i class="dot ' + (a.loggedIn?'warn':'bad') + '"></i><span>' + (a.loggedIn?'最近账号':'无记录') + '</span>';
 
     $('cContainer').textContent = c.status || '未知';
     $('cPid').textContent = app.pid ? ('PID ' + app.pid + ' · 运行中') : '未运行';
