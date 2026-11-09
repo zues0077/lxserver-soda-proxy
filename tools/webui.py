@@ -361,9 +361,10 @@ summary:hover{color:var(--txt)}
         当前账号已登录，无需再次登录。换号时才需要走下面的流程。
       </div>
       <div class="note" style="color:#8b93a7">
-        实测说明：这一版汽水的验证码是<b>内置 WebView 画出来的</b>，在容器里渲染不出来（灰屏），
-        所以短信/扫码在容器内都走不通。换号请用「从已登录设备同步」——在平板上登录一次，
-        我把登录态整包搬进容器，之后这个容器就一直是你那个号。
+        实测说明（2026-11-09 更新）：登录页是<b>原生控件</b>，容器里<b>能正常渲染</b>
+        （手机号输入框、获取短信验证码按钮都在，不是灰屏）。点下面的「手机号登录」会直接把
+        App 切到登录页，然后在页面下方「远程画面」里操作：点手机号框 → 用「输入文字」填号码 →
+        勾选协议 → 点「获取短信验证码」，最后把收到的验证码填进去即可。
       </div>
     </div>
 
@@ -450,10 +451,13 @@ async function loadBenefit(force){
 
 function showLogin(kind){
   if (kind === 'qr') {
-    toast('当前汽水版本没有扫码入口（只有手机号验证码）');
+    toast('这一版汽水没有扫码入口（只有手机号验证码）');
     return;
   }
-  toast('短信登录：容器内的验证码组件无法渲染，需先「从设备同步登录态」');
+  fetch('/login/open').then(r=>r.text()).then(t=>{
+    toast(t);
+    setTimeout(refreshScreen, 1200);
+  });
 }
 
 function openApp(){ fetch('/launch').then(r=>r.text()).then(t=>toast(t)); }
@@ -552,6 +556,14 @@ class Handler(BaseHTTPRequestHandler):
             if png:
                 return self._send(200, png, 'image/png')
             return self._send(503, 'no screenshot')
+
+        if p == '/login/open':
+            # 把 App 切到登录页：热启动 + 点底部「我的」（未登录时「我的」就是登录入口）
+            adb('shell', 'am', 'start', '-n', ACT, timeout=40)
+            time.sleep(1.5)
+            adb('shell', 'input', 'tap', '1000', '1734', timeout=20)
+            time.sleep(1.5)
+            return self._send(200, '已切到登录页：在下方画面点手机号框，用「输入文字」填号码，勾选协议后点「获取短信验证码」')
 
         if p == '/launch':
             adb('shell', 'am', 'start', '-n', ACT, timeout=40)

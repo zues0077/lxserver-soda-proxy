@@ -68,7 +68,7 @@ def is_root(force=False):
 
 
 _OFFLINE_HINTS = ("device offline", "error: closed", "no devices", "device not found",
-                  "error: device", "connection reset")
+                  "error: device", "connection reset", "not found", "no devices/emulators")
 
 
 def _looks_offline(out):
