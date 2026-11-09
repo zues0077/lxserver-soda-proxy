@@ -28,18 +28,55 @@ def shell(cmd, timeout=60):
         return ""
 
 
+def adb(*args, timeout=30):
+    """直接执行 adb 子命令（root / wait-for-device 这类，不走 shell）。"""
+    try:
+        r = subprocess.run(config.adb_args() + list(args),
+                           capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or "") + (r.stderr or "")
+    except subprocess.TimeoutExpired:
+        return ""
+
+
 _IS_ROOT = None
+_ROOT_AT = 0.0
+# 「不是 root」这个结论**不能永久缓存**：容器重启后 adbd 会掉回 shell，
+# 而且 adb root 之后又会变回来。只短期信它，避免一次误判把整轮都判死。
+_ROOT_FAIL_TTL = 30.0
 
 
-def is_root():
+def is_root(force=False):
     """adbd 本身是否已经是 root（redroid 容器默认就是，真机 Magisk 不是）。"""
-    global _IS_ROOT
-    if _IS_ROOT is None:
-        try:
-            _IS_ROOT = shell("id -u", timeout=15).strip() == "0"
-        except Exception:
-            _IS_ROOT = False
+    global _IS_ROOT, _ROOT_AT
+    now = time.time()
+    if not force and _IS_ROOT is True:
+        return True
+    if not force and _IS_ROOT is False and now - _ROOT_AT < _ROOT_FAIL_TTL:
+        return False
+    try:
+        _IS_ROOT = shell("id -u", timeout=15).strip() == "0"
+    except Exception:
+        _IS_ROOT = False
+    _ROOT_AT = now
     return _IS_ROOT
+
+
+def ensure_root():
+    """确保 adbd 是 root，不是就 `adb root` 一次。
+
+    为什么必须有：redroid 容器**每次重启后 adbd 都掉回 shell**（uid=2000），
+    这时 `ls /data/data/<pkg>/databases` 直接 Permission denied，
+    表现却是「队列未命中」——看着像没缓存，实际是读不到库。
+    """
+    if is_root(force=True):
+        return True
+    out = adb("root", timeout=30)
+    if "cannot run as root" in out:
+        # 生产版固件不给 root，只能走 su 分支
+        return False
+    adb("wait-for-device", timeout=30)
+    time.sleep(1.5)
+    return is_root(force=True)
 
 
 def su(cmd, timeout=60):
@@ -48,14 +85,23 @@ def su(cmd, timeout=60):
     redroid 里未关闭的 adbd 本身就是 root，没有 `su` 这个二进制；
     真机（Magisk）则是 uid=2000 需要走 su。两种情况都要能跑，
     否则换宿主就会稳定报 `su: not found`。
+
+    权限被拒时**自动重取 root 再试一次** —— 覆盖「容器重启后 adbd 掉权」这个高频场景。
     """
-    if is_root():
-        return shell(cmd, timeout=timeout)
-    quoted = "su -c '%s'" % cmd.replace("'", "'\\''")
-    out = shell(quoted, timeout=timeout)
-    if "not found" in out or "inaccessible" in out:
-        # 万一 su 不存在但其实已经有权限，退回直接执行
-        return shell(cmd, timeout=timeout)
+    out = ""
+    for attempt in (0, 1):
+        if is_root():
+            out = shell(cmd, timeout=timeout)
+        else:
+            quoted = "su -c '%s'" % cmd.replace("'", "'\\''")
+            out = shell(quoted, timeout=timeout)
+            if "not found" in out or "inaccessible" in out:
+                # 万一 su 不存在但其实已经有权限，退回直接执行
+                out = shell(cmd, timeout=timeout)
+        if "Permission denied" not in out:
+            return out
+        if attempt == 0:
+            ensure_root()
     return out
 
 

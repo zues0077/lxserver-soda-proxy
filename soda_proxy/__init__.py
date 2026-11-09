@@ -8,4 +8,6 @@
 __version__ = "0.1.0"
 
 from .resolver import resolve, list_queue, clean_name  # noqa: F401
-from . import config, device, queue, resolver, server  # noqa: F401
+# 不要在这里 import server：`python -m soda_proxy.server` 会因此触发
+# "found in sys.modules prior to execution" 警告，并让模块被加载两份。
+from . import config, device, queue, resolver  # noqa: F401

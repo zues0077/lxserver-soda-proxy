@@ -31,6 +31,12 @@ def _workdir():
 def _db_paths():
     """列出设备上所有 recent_played*.db，按名字长度降序（uid 版优先，避开 recent_played_0.db）。"""
     out = device.su("ls %s" % config.DB_DIR, timeout=30)
+    # 权限被拒必须显式报错：否则上层只会得到「队列未命中」，
+    # 看起来像没缓存，实际是 adbd 没 root（容器重启后必然发生一次）。
+    if "Permission denied" in out:
+        raise RuntimeError(
+            "读不到 App 私有目录（adbd 不是 root）。redroid 容器重启后需要 adb root，"
+            "已尝试自动重取仍失败，请检查容器内 adbd")
     names = []
     for line in out.splitlines():
         name = line.strip().split("/")[-1]

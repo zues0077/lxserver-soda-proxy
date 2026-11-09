@@ -12,7 +12,7 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import resolver
+from . import device, resolver
 
 # 供外部注入（测试时可替换）
 _RESOLVE = resolver.resolve
@@ -39,7 +39,13 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed.query)
 
         if path == "/health":
-            return self._send(200, {"ok": True, "service": "soda-proxy"})
+            # root / adb 状态一并暴露：容器重启后 adbd 掉权是高频问题，
+            # 面板和 lxserver 都能从这里一眼看出「不是没缓存，是读不到库」
+            try:
+                rooted = device.is_root()
+            except Exception:
+                rooted = False
+            return self._send(200, {"ok": True, "service": "soda-proxy", "root": rooted})
 
         if path == "/queue":
             limit = int((qs.get("limit") or ["50"])[0])
@@ -68,8 +74,14 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(host="0.0.0.0", port=18090):
     """启动服务（阻塞）。"""
+    # 启动就抢一次 root：容器重启后 adbd 默认掉回 shell，等第一次请求再修会
+    # 把「读不到库」伪装成「队列未命中」，排障时很费时间。
+    try:
+        device.ensure_root()
+    except Exception as e:
+        print("[soda-proxy] 启动取 root 失败：%s" % e)
     srv = ThreadingHTTPServer((host, port), Handler)
-    print("[soda-proxy] listening on http://%s:%d" % (host, port))
+    print("[soda-proxy] listening on http://%s:%d (root=%s)" % (host, port, device.is_root()))
     srv.serve_forever()
 
 
