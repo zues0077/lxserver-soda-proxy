@@ -104,6 +104,21 @@
 | 4.6 | 容器里点到的位置全错 | 容器分辨率与 `config.py` 里的坐标不一致 | 起容器就用 **1200×1848 / dpi 240 / `gpu_mode=guest`**，与实测坐标对齐 |
 | 4.7 | 官方文档说 `pid_max` 必须 < 65535，本机是 4194304，以为卡住了 | 实测**不是阻塞点** | 不用为它改内核参数（改它影响整机，且当前 pid 可能已超 65535） |
 | 4.8 | ARM 主机上想强制指定架构 | 多架构 manifest 会自动选 | 直接 `docker pull redroid/redroid:15.0.0-latest` 即可拿到 arm64；别手写 `--platform` 反而可能选错 |
+| 4.9 | 🔴 Docker Hub 拉不动 / 只有 122 KB/s | 国内直连 `registry-1.docker.io` 超时；部分镜像站限速 | 用 `docker.1ms.run/` 前缀拉（实测 7.7 MB/s，快 60 倍），拉完 `docker tag` 回原名；不改 daemon 配置 |
+| 4.10 | 🔴 汽水在容器里一启动就被杀（x86 是崩溃，这里是 ANR） | `Input dispatching timed out 5003ms` —— A55 启动慢，**并发 dex2oat 时必死** | **CPU 空闲时启动**（本次 pid 稳定 70s+，界面正常）；`hide_error_dialogs=1` 挡不住 kill；`--memory 2560m` 下跑全量 AOT 会 OOM |
+| 4.11 | SFTP 传 APK 报 `FileNotFoundError: [Errno 2]` | 目录是 `d---------`（root 所有），不是路径不存在 | `chmod 777` 后小文件能写，**190MB 仍会失败** → 改 SSH 管道 `cat > 文件`（25MB/s）+ 两端 sha256 校验 |
+| 4.12 | adb 命令时好时坏，`device not found` | adb server 在两次命令之间被回收（进程组被杀） | 每条命令开头都 `adb connect <ip>:5555` |
+| 4.13 | 点按钮没反应，坐标看着没问题 | 截图实际 1200×1848，显示端会缩放到 707 宽 | 用 PIL 找目标颜色像素质心再 tap；验证触摸是否生效可下拉通知栏看 `mCurrentFocus` |
+| 4.14 | 日志有 `libnapi_v8.so not found` 就以为坏了 | APK 只带 `liblynx_v8_bridge.so`，运行时走 quickjs/LepusNG | 这是**无害警告**，别当失败 |
+| 4.15 | 🔴 点「获取短信验证码」弹窗一片灰，APP 随后被杀 | 字节验证码 SDK（`BdTuringVerifyActivity`）用的是**自带 WebView**，在 redroid 的 guest 软件渲染下画不出内容 | **别在容器里登录**。把已登录设备的整包数据搬进容器（见 4.16） |
+| 4.16 | 想让容器直接继承平板/手机上的登录态 | 登录态在 `databases` + `shared_prefs` + `files/keva` 里，验证码要靠 `files/turing_web_res` + `files/webview_bytedance` | 打包这 6 项（排除 `files/music`/`plugins`/`offlineX` 大缓存）→ `docker cp` → `tar xzf` → `chown -R <容器uid>` → `restorecon -R`；**uid 按容器 `dumpsys package | grep userId`**，别抄源设备的 |
+| 4.17 | 加了 `webview-command-line --disable-gpu` 后 APP 直接闪退 | 字节自带 WebView 处理该开关时断言失败（`SIGTRAP`，寄存器里就是 `able-gpu` 字符串） | 这个开关对汽水**不可用**；想调 WebView 渲染这条路整体放弃 |
+| 4.18 | 加了 `--in-process-gpu` 后**整个界面点击都没反应** | chromium 的输入通道被破坏，不是坐标错也不是主线程卡死 | 千万别加；只留 `--disable-gpu` 时点击正常（但验证码会崩，所以两个都别用） |
+| 4.19 | `gpu_mode=swiftshader` 容器 Up、5555 在监听，但 adb 连不上（10060） | adbd 在该模式下起不来 | 直接回 `guest`，别等 |
+| 4.20 | 密钥解出来 `valid=true`，但下载 403、0 字节，加 UA/Referer 都没用 | 直链自带的 `url_expire` 已过期，**不是防盗链** | 读 `video_model.url_expire`，`url_expire - now > 0` 才有效；过期就重新取链（搜索→点歌） |
+| 4.21 | 🔴 App 常驻后容器整体卡死（adb 全部超时） | A55 上 App 空转 CPU 218%，`am force-stop` 报 `Broken pipe` = system_server 已崩 | **不要常驻**：`systemctl disable --now soda-keepalive`，App 按需启动；容器自愈交给 `--restart unless-stopped` |
+| 4.22 | 想截 App「我的」页看畅听天数，`screencap` 卡死（40s / 0 字节） | 播放页有视频 Surface，合成器不返回；桌面和非播放页正常 | 别在播放页截图；畅听用快照文件（`benefit_state.json`）+ 标注同步时间，不假装实时 |
+| 5.9 | 用容器 Cookie 调 `/luna/me` 提示「登录状态已失效」 | 需要 mssdk 签名，光有 sessionid + `x-common-params-v2` 不够 | 放弃接口取权益；账号信息改读 `account_db.login_info` |
 
 ---
 
