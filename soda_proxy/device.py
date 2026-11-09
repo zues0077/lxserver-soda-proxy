@@ -136,15 +136,15 @@ def input_text(text):
 
 
 def app_pid():
-    """返回 App 主进程 pid，未运行返回 0。"""
-    out = shell("ps -A | grep %s" % config.PKG, timeout=20)
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) > 1 and config.PKG in line:
-            try:
-                return int(parts[1])
-            except ValueError:
-                continue
+    """返回 App 主进程 pid，未运行返回 0。
+
+    用 `pidof` 而不是 `ps -A | grep`：更快，也不会被 ps 的列宽/截断坑到。
+    `pidof` 可能返回多个（比如 :push 子进程），取第一个数字即可。
+    """
+    out = shell("pidof %s" % config.PKG, timeout=20)
+    for tok in out.split():
+        if tok.isdigit():
+            return int(tok)
     return 0
 
 

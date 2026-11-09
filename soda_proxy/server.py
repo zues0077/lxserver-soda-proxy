@@ -84,13 +84,22 @@ def _keepalive_loop(interval=120):
     time.sleep(5)                     # 让 web 服务先起来
     while True:
         try:
-            if device.app_pid() == 0 and device._DEVICE_LOCK.acquire(blocking=False):
+            pid = device.app_pid()
+            if pid == 0 and device._DEVICE_LOCK.acquire(blocking=False):
                 try:
+                    print("[keepalive] 进程不在，开始预热", flush=True)
                     if device.cold_start():
-                        device.key(3)     # HOME：退到后台
-                        print("[keepalive] App 已预热并退到后台", flush=True)
+                        # 先暂停再退后台：App 恢复的播放会话会自动放歌，
+                        # 后台解码实测把 CPU 从 3.5% 顶到 78%（HDD 上还带 IO）。
+                        device.key(127)   # MEDIA_PAUSE
+                        device.key(3)     # HOME
+                        print("[keepalive] 已预热 pid=%s 并退到后台" % device.app_pid(), flush=True)
+                    else:
+                        print("[keepalive] 预热失败（App 未到前台）", flush=True)
                 finally:
                     device._DEVICE_LOCK.release()
+            elif pid:
+                print("[keepalive] 在线 pid=%s" % pid, flush=True)
         except Exception as e:
             print("[keepalive] %s: %s" % (type(e).__name__, e), flush=True)
         time.sleep(interval)

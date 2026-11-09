@@ -156,6 +156,11 @@ def resolve(track_id, name=None, timeout=None, fast=False):
                 node = wait_track(track_id, min(config.PICK_WAIT, timeout))
                 tried.append({"keyword": kw, "index": idx})
                 if node:
+                    # 拿到结果就暂停+退后台：App 在前台要软渲染（200%+ CPU），
+                    # 留在后台继续放歌也会一直解码（实测 78% CPU）。
+                    # 我们要的只是它把直链写进库，写完就没用了。
+                    device.key(127)   # MEDIA_PAUSE
+                    device.key(3)     # HOME
                     return _result(track_id, node, "search",
                                    {"picked": {"keyword": kw, "index": idx}})
                 device.back()
