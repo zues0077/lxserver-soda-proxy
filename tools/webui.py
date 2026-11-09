@@ -297,7 +297,8 @@ details{margin-top:22px;border:1px solid var(--line);border-radius:12px;backgrou
 summary{cursor:pointer;padding:13px 18px;font-size:13px;color:var(--dim);user-select:none}
 summary:hover{color:var(--txt)}
 .adv{padding:0 18px 18px}
-#scr{width:100%;max-width:360px;border-radius:8px;border:1px solid var(--line);display:block;cursor:crosshair}
+#scr{width:100%;max-width:360px;border-radius:8px;border:1px solid var(--line);display:block;cursor:crosshair;
+  -webkit-user-drag:none;user-select:none;touch-action:none}
 .tag{font-size:11px;padding:1px 7px;border-radius:999px;background:#1e2530;color:var(--dim);margin-left:6px}
 #toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#232a36;border:1px solid #3a4557;padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;pointer-events:none;transition:.25s}
 #toast.on{opacity:1}
@@ -385,7 +386,7 @@ summary:hover{color:var(--txt)}
       <div class="note" style="margin:0 0 12px">
         这里是容器的<b>真实屏幕</b>，只在排障时需要。日常不用看它。
       </div>
-      <img id="scr" alt="屏幕">
+      <img id="scr" alt="屏幕" draggable="false">
       <div class="btns">
         <button onclick="refreshScreen()">刷新画面</button>
         <button onclick="key(4)">返回</button>
@@ -488,18 +489,31 @@ function toDev(ev){
           Math.round((ev.clientY-r.top)*im.naturalHeight/r.height)];
 }
 let dragFrom=null, dragged=false;
-$('scr').addEventListener('mousedown', e=>{ dragFrom = toDev(e); dragged = false; });
-$('scr').addEventListener('mousemove', e=>{
-  if(!dragFrom) return;
-  const p = toDev(e);
-  if(Math.abs(p[0]-dragFrom[0])>8 || Math.abs(p[1]-dragFrom[1])>8) dragged = true;
+$('scr').addEventListener('dragstart', e=>e.preventDefault());
+$('scr').addEventListener('pointerdown', e=>{
+  e.preventDefault();
+  try{ $('scr').setPointerCapture(e.pointerId); }catch(_){}
+  dragFrom = toDev(e); dragged = false;
+  $('advStatus').textContent = '按下 '+dragFrom[0]+','+dragFrom[1]+'，拖动中…';
 });
-window.addEventListener('mouseup', e=>{
+$('scr').addEventListener('pointermove', e=>{
   if(!dragFrom) return;
+  e.preventDefault();
+  const p = toDev(e);
+  if(Math.abs(p[0]-dragFrom[0])>6 || Math.abs(p[1]-dragFrom[1])>6){
+    dragged = true;
+    $('advStatus').textContent = '拖动 '+dragFrom[0]+','+dragFrom[1]+' → '+p[0]+','+p[1];
+  }
+});
+$('scr').addEventListener('pointerup', e=>{
+  if(!dragFrom) return;
+  e.preventDefault();
   const from = dragFrom, to = toDev(e); dragFrom = null;
-  if(!dragged) return;                       // 没拖动就交给 click
+  if(!dragged){ $('advStatus').textContent = '点击 '+to[0]+','+to[1]; return; }
+  $('advStatus').textContent = '松手，发送拖动…';
   fetch('/swipe?x1='+from[0]+'&y1='+from[1]+'&x2='+to[0]+'&y2='+to[1])
-    .then(r=>r.text()).then(t=>{ $('advStatus').textContent=t; setTimeout(refreshScreen, 700); });
+    .then(r=>r.text()).then(t=>{ $('advStatus').textContent=t; setTimeout(refreshScreen, 900); })
+    .catch(err=>{ $('advStatus').textContent='拖动失败: '+err; });
 });
 $('scr').addEventListener('click', e=>{
   if(dragged){ dragged=false; return; }      // 拖完的那一下不当作点击
