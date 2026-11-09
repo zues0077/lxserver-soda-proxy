@@ -444,8 +444,13 @@ async function loadSummary(){
     $('cKeepalive').innerHTML = '<i class="dot ' + (ar?'ok':'warn') + '"></i> ' + (ar ? ('已开启（' + c.autorestart + '）') : '未开启');
     $('cTime').textContent = new Date().toLocaleTimeString();
 
+    // 注意：a.loggedIn 只代表「本地有历史账号记录」（account_db 缓存，登出后不清），
+    // 不代表当前真的登录着。所以这里不能写「已登录，无需再次登录」，否则一直误导。
     if (a.loggedIn) {
-      $('loginNote').innerHTML = '当前账号已登录，无需再次登录。换号时才需要走下面的流程。';
+      $('loginNote').innerHTML = '下面是<b>最近一次登录</b>的账号记录（退出后仍保留，仅作参考）。' +
+        '要换号或首次登录，直接填手机号走下面的流程。';
+    } else {
+      $('loginNote').innerHTML = '当前没有账号记录。填手机号点「获取验证码」即可登录。';
     }
   }catch(e){ toast('状态读取失败：'+e); }
 }
@@ -480,7 +485,14 @@ function sendCode(){
       const steps = (d.steps || []).join(' → ');
       loginNote((d.ok ? '✅ 验证码已发送：' : '❌ 没通过：') + steps, !d.ok);
       if(d.ok) { toast('已发送，去收短信'); }
-      else { toast('滑块没过，点「获取验证码」重试一次'); }
+      else {
+        toast('自动过滑块没成功，请手动拖一下');
+        loginNote('❌ 自动过滑块没成功。滑块是防机器人的，自动识别只能做到「大概率」。' +
+          '<br><b>请在下方的「远程画面」里手动拖一次</b>：按住左下角灰色箭头，把小图拖进缺口松手，' +
+          '只要 3 秒，比自动更稳。拖完画面会自动刷新，再点一次「获取验证码」。', true);
+        const s = $('scr');
+        if(s) s.scrollIntoView({behavior:'smooth', block:'center'});
+      }
       refreshScreen();
     })
     .catch(e => loginNote('调用失败：' + e, true));

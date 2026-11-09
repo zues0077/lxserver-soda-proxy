@@ -73,13 +73,22 @@ def find_piece(im):
     白色判定用「三通道都 > 235」——天空/云只是单通道亮，不是白色。
     """
     a = np.asarray(im.crop(IMG_BOX)).astype(np.int16)
-    white = np.min(a, axis=2) > 235
-    blobs = _blobs(white, min_px=25)
+    # 描边不是纯白：实测同一张图阈值 235 时白像素只有 604 个（连不成块），
+    # 210~220 才能切出 107x105 的完整轮廓。所以逐个阈值试，取第一个像样的块。
     cands = []
-    for x1, y1, x2, y2, n in blobs:
-        bw, bh = x2 - x1, y2 - y1
-        if 50 <= bw <= 220 and 50 <= bh <= 220:
-            cands.append((n, x1, y1, x2, y2))
+    for th in (235, 228, 220, 212, 204, 196):
+        white = np.min(a, axis=2) > th
+        if white.sum() < 40:
+            continue
+        for x1, y1, x2, y2, n in _blobs(white, min_px=40):
+            bw, bh = x2 - x1, y2 - y1
+            if 50 <= bw <= 220 and 50 <= bh <= 220:
+                # 轮廓是中空的，像素数远小于面积，用「面积/像素」确认是描边不是实心色块
+                fill = n / float(bw * bh)
+                if fill < 0.28:
+                    cands.append((n, x1, y1, x2, y2))
+        if cands:
+            break
     if not cands:
         return None
     # 描边最完整（像素最多）的那个；同分取更靠左的
@@ -93,60 +102,37 @@ def find_piece(im):
 
 
 def find_gaps(im, piece):
-    """候选缺口：明显更暗的竖向连通块，尺寸与拼图块接近。
+    """候选缺口：深色**实心**连通块，尺寸与拼图块接近。
 
-    阈值不能用「中位数 - 45」这种相对值：图片里有远山/树木等大片深色，
-    会和缺口连成一条超长区域，被宽度过滤掉（实测候选恒为 0）。
-    改成按固定暗度阈值逐个试（40~80），哪个阈值能切出 1~3 个合理宽度的块就用哪个。
+    不能用「列投影 + 纵向取样带」：取样带一窄就把缺口切碎（实测只剩 61px 宽），
+    一宽又和远山/树木连成一片。改连通域 + 填充率过滤（缺口是实心，描边是空心）。
     """
     a = np.asarray(im.crop(IMG_BOX)).astype(np.int16)
-    h, w, _ = a.shape
     luma = a.mean(axis=2)
 
-    cy = int(piece["cy"] - IMG_BOX[1])
-    y1 = max(0, cy - int(piece["h"] * 1.2))
-    y2 = min(h, cy + int(piece["h"] * 1.2))
-
-    best = []
-    for th in (40, 50, 60, 70, 80):
+    for th in (40, 50, 60, 70, 80, 95):
         dark = luma < th
-        band = np.zeros_like(dark)
-        band[y1:y2, :] = True
-        dark = dark & band
-
-        cols = dark.sum(axis=0)
-        runs, start = [], None
-        for x in range(w):
-            if cols[x] >= 6:
-                if start is None:
-                    start = x
-            elif start is not None:
-                runs.append((start, x - 1))
-                start = None
-        if start is not None:
-            runs.append((start, w - 1))
-
+        if dark.sum() < 200:
+            continue
         cands = []
-        for x1, x2 in runs:
-            gw = x2 - x1
-            if gw < piece["w"] * 0.5 or gw > piece["w"] * 1.5:
+        for x1, y1, x2, y2, n in _blobs(dark, min_px=150):
+            gw, gh = x2 - x1, y2 - y1
+            if gw < piece["w"] * 0.5 or gw > piece["w"] * 1.6:
                 continue
-            sub = dark[:, x1:x2 + 1]
-            yy = np.nonzero(sub.any(axis=1))[0]
-            if len(yy) == 0:
+            if gh < piece["h"] * 0.5 or gh > piece["h"] * 2.2:
                 continue
-            gh = int(yy.max() - yy.min())
-            if gh < piece["h"] * 0.5:
+            fill = n / float(max(gw * gh, 1))
+            if fill < 0.42:           # 缺口是实心的；细长/镂空的东西不要
                 continue
             cands.append({
                 "cx": IMG_BOX[0] + (x1 + x2) / 2.0,
-                "cy": IMG_BOX[1] + (yy.min() + yy.max()) / 2.0,
+                "cy": IMG_BOX[1] + (y1 + y2) / 2.0,
                 "w": gw, "h": gh,
+                "luma": float(luma[y1:y2 + 1, x1:x2 + 1][dark[y1:y2 + 1, x1:x2 + 1]].mean()),
             })
         if cands:
-            best = cands
-            break
-    return best
+            return cands
+    return []
 
 
 def pick_gap(piece, gaps):
@@ -155,9 +141,11 @@ def pick_gap(piece, gaps):
     if not right:
         return None
     def score(g):
-        return (abs(g["w"] - piece["w"]) / piece["w"] +
+        size = (abs(g["w"] - piece["w"]) / piece["w"] +
                 abs(g["h"] - piece["h"]) / max(piece["h"], 1) +
                 abs(g["cy"] - piece["cy"]) / max(piece["h"], 1) * 0.5)
+        # 真缺口是「被挖掉的阴影」，比周围的干扰项更暗；干扰项通常是半透明覆盖
+        return size + g.get("luma", 255.0) / 255.0 * 0.6
     return min(right, key=score)
 
 
@@ -167,7 +155,7 @@ def _dialog_closed(im):
     return float(area.mean()) > 235 and float(area.std()) < 12
 
 
-def solve(max_rounds=6):
+def solve(max_rounds=2):
     """自动过滑块。失败会自动重试——App 每次判定失败都会换一张新图。
 
     为什么必须重试：图里通常有 2~3 个尺寸接近的暗色形状，只有一个是真缺口，
