@@ -9,7 +9,7 @@
 import re
 import time
 
-from . import config, device, queue
+from . import config, device, queue, ui
 
 # 歌名里的括号/方括号内容要丢掉：「稻香（杰伦）」搜不到，搜「稻香」才有结果
 _BRACKET = re.compile(r"[（(【\[].*?[）)】\]]")
@@ -144,11 +144,15 @@ def resolve(track_id, name=None, timeout=None, fast=False):
     # B. 搜索兜底（串行，避免与其它请求抢设备）
     with device.device_lock():
         device.ensure_adb_ime()
+        # 关掉系统动画：uiautomator dump 的 waitForIdle 需要「一秒内无无障碍事件」，
+        # 页面有动画就永远等不到，dump 会直接报 could not get idle state。
+        ui.ensure_quiet_animations()
         tried = []
         for kw in ([clean_name(name)] + ([name] if clean_name(name) != name else [])):
-            device.open_search_and_type(kw)
-            for idx, y in device.click_results():
-                device.tap(config.RESULT_X, y, delay=0.5)
+            ui.open_search_and_type(kw)
+            # 点搜索结果：优先按节点定位（换分辨率不失效），dump 失败才用兜底坐标
+            for idx, (px, py) in enumerate(ui.result_points(name or kw, limit=3)):
+                device.tap(px, py, delay=0.5)
                 node = wait_track(track_id, min(config.PICK_WAIT, timeout))
                 tried.append({"keyword": kw, "index": idx})
                 if node:

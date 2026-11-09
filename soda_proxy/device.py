@@ -144,37 +144,38 @@ def ensure_adb_ime():
     return True
 
 
-def cold_start():
-    """冷启动到发现页。
+def resumed_activity():
+    """当前处于 resumed 状态的 Activity 那一行（拿不到返回 ''）。"""
+    out = shell("dumpsys activity activities | grep -m1 mResumedActivity", timeout=25)
+    return out.strip()
+
+
+def wait_foreground(timeout=110):
+    """等 App 真正到前台。
+
+    为什么不能用固定 sleep：RK3566 上冷启动实测 20~90 秒不等（换分辨率、
+    首次安装、缓存冷热差别都很大）。固定 sleep 20 秒会 dump 到**桌面**，
+    于是「找搜索图标」找到的是桌面的搜索框，整条流程静默走偏。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3)
+        if config.PKG in resumed_activity():
+            time.sleep(2)          # 再给首屏一次布局
+            return True
+    return False
+
+
+def cold_start(timeout=110):
+    """冷启动到首页，并**确认真的到了前台**。
 
     必须冷启动：App 停在结果页时右上角是「×」而不是搜索图标，
-    点 (1150,70) 只会清空、不会进搜索页。
+    直接点搜索图标只会清空、不会进搜索页。
     """
     shell("am force-stop %s" % config.PKG, timeout=25)
-    time.sleep(2)
+    time.sleep(1.5)
     shell("am start -n %s" % config.MAIN_ACTIVITY, timeout=40)
-    # 弱 CPU（RK3566/A55）首屏要 20 秒上下；等不够会点到「×」而不是搜索图标
-    time.sleep(20)
-
-
-def open_search_and_type(name):
-    """冷启动 → 搜索页 → 输入歌名 → 点第一条联想进结果页。"""
-    cold_start()
-    tap(*config.SEARCH_ICON, delay=3.0)
-    tap(*config.SEARCH_BOX, delay=2.0)
-    # 冷启动后搜索框本来是空的，清空只是兜底。原来 20 次 keyevent 在 A55 上
-    # 单次就能卡 20 秒，直接把整条流程拖死 —— 降到 3 次并收紧超时。
-    for _ in range(3):
-        key(67, 0.05, timeout=8)
-    input_text(name)
-    tap(*config.SUGGEST_FIRST, delay=5.0)
-
-
-def click_results(max_per_layout=3):
-    """依次点搜索结果条目的生成器：先试「有卡片」布局，再试「无卡片」布局。"""
-    for ys in (config.RESULT_YS_WITH_CARD, config.RESULT_YS_NO_CARD):
-        for idx, y in enumerate(ys[:max_per_layout]):
-            yield idx, y
+    return wait_foreground(timeout)
 
 
 def back(delay=1.2):

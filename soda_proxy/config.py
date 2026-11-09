@@ -22,15 +22,36 @@ PICK_WAIT = int(os.environ.get("SODA_PICK_WAIT", "6"))
 WORK_DIR = os.environ.get("SODA_WORK_DIR", None)
 
 # ---- UI 坐标 ----
-# ⚠️ 以下坐标按 1080x1920 竖屏实测（平板实测设备为 1200x1848，同样适用）。
-# 换分辨率必须重新校准，否则会点到别的控件。
+# ⚠️ 下面这组坐标是「dump 不出层级时的兜底」，按 1200x1848 竖屏实测标定。
+# 正常路径走 ui.py 的节点定位（按 text / resource-id 找，换分辨率不失效）；
+# 只有 uiautomator dump 失败（页面动画导致 waitForIdle 超时）才会用到这些数字，
+# 而且会经 ui.scale_point() 按当前分辨率等比缩放。
+BASE_SIZE = (1200, 1848)
 SEARCH_ICON = (1150, 70)       # 右上角放大镜（冷启动落在发现页时）
 SEARCH_BOX = (400, 82)         # 搜索输入框
 SUGGEST_FIRST = (220, 139)     # 搜索联想第一条
-RESULT_X = 220                 # 搜索结果条目点击的 x
-# 搜索结果「歌曲」列前 3 条的 y：分别对应「有你可能想搜卡片」和「无卡片」两种布局
+RESULT_X = (220, 0)            # 搜索结果条目点击的 x（只取 x 分量）
+# 搜索结果「歌曲」列前 3 条的 y（只取 y 分量）
+RESULT_Y1 = (0, 473)
+RESULT_Y2 = (0, 592)
+RESULT_Y3 = (0, 711)
 RESULT_YS_WITH_CARD = (473, 592, 711)
 RESULT_YS_NO_CARD = (353, 472, 591)
+
+# 分分辨率坐标表（ui.profile_point 优先查这里，查不到才对 BASE_SIZE 等比缩放）。
+# ⚠️ 等比缩放**不可靠**：1200x1848(dpi240) 是类平板布局、720x1280(dpi320) 是手机布局，
+# 搜索图标在两者里的相对位置就不一样（0.958,0.038 vs 0.906,0.073），所以小分辨率必须单独标定。
+PROFILES = {
+    "720x1280": {
+        "SEARCH_ICON": (652, 94),
+        "SEARCH_BOX": (300, 110),
+        "SUGGEST_FIRST": (300, 190),
+        "RESULT_X": (200, 0),
+        "RESULT_Y1": (0, 300),
+        "RESULT_Y2": (0, 430),
+        "RESULT_Y3": (0, 560),
+    },
+}
 
 # ---- 输入法 ----
 # adb shell input text 会丢弃中文，必须用 ADBKeyboard 才能输入歌名
