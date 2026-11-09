@@ -27,3 +27,21 @@ services:
       SODA_WORK_DIR: "/tmp/soda-proxy"
     volumes:
       - ./data:/tmp/soda-proxy
+
+  # 账号面板（浏览器里看账号/畅听权益/容器保活，还能远程点按）
+  # 同样用 host 网络：它要连 127.0.0.1:5555 上的 adb，也要访问 docker.sock 查容器状态。
+  soda-webui:
+    image: soda-proxy:local
+    container_name: soda-webui
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - soda-proxy
+    environment:
+      SODA_SERIAL: "127.0.0.1:5555"
+    volumes:
+      # 查容器状态用；只读挂载足够
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 宿主 docker CLI 是静态-ish（只依赖 libc），在 Debian slim 里可直接用
+      - /usr/bin/docker:/usr/local/bin/docker:ro
+    command: ["python3", "-u", "/app/tools/webui.py", "--serial", "127.0.0.1:5555", "--port", "18091"]
