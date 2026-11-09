@@ -30,6 +30,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_html(self, code, html):
+        body = html.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, fmt, *args):
         # 默认会往 stderr 打访问日志，保留但简化
         print("[http] " + (fmt % args))
@@ -38,6 +46,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = urllib.parse.parse_qs(parsed.query)
+
+        if path == "/":
+            # 浏览器直接打开 18090 时，原来只有 {"ok":false,"error":"unknown path"}，
+            # 看着像服务挂了。给一个落地页：状态 + 账号面板入口 + 接口清单。
+            host = self.headers.get("Host") or "127.0.0.1:18090"
+            hostname = host.split(":")[0]
+            return self._send_html(200, _landing(hostname))
 
         if path == "/health":
             # root / adb 状态一并暴露：容器重启后 adbd 掉权是高频问题，
@@ -71,6 +86,46 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200 if res.get("ok") else 404, res)
 
         return self._send(404, {"ok": False, "error": "unknown path"})
+
+
+def _landing(host):
+    """18090 的落地页：不是 API，是给人看的。"""
+    panel = "http://%s:18091/" % host
+    try:
+        rooted = device.is_root()
+    except Exception:
+        rooted = None
+    badge = ("正常" if rooted else ("可用（adbd 未 root）" if rooted is not None else "未知"))
+    color = "#16a34a" if rooted else "#d97706"
+    return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>汽水取链代理</title></head>
+<body style="font:15px/1.7 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#111">
+<h1 style="font-size:22px;margin:0 0 4px">汽水取链代理</h1>
+<p style="color:#666;margin:0 0 24px">soda-proxy · 给 lxserver 用的 JSON 接口</p>
+
+<div style="border:1px solid #e5e7eb;border-radius:10px;padding:16px 18px;margin-bottom:20px">
+  <div style="font-size:13px;color:#666">服务状态</div>
+  <div style="margin-top:6px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%%;background:%s;margin-right:8px"></span>%s</div>
+</div>
+
+<div style="border:1px solid #e5e7eb;border-radius:10px;padding:16px 18px;margin-bottom:20px">
+  <div style="font-size:13px;color:#666;margin-bottom:8px">账号与登录</div>
+  <a href="%s" style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;padding:9px 16px;border-radius:8px;font-size:14px">打开汽水账号面板 →</a>
+  <div style="font-size:13px;color:#6b7280;margin-top:10px">%s:18091 · 账号状态、畅听权益、容器保活、远程画面与按键</div>
+</div>
+
+<div style="border:1px solid #e5e7eb;border-radius:10px;padding:16px 18px">
+  <div style="font-size:13px;color:#666;margin-bottom:10px">接口</div>
+  <table style="width:100%%;border-collapse:collapse;font-size:13px">
+    <tr><td style="padding:5px 0;color:#374151;white-space:nowrap"><code>GET /health</code></td><td style="color:#6b7280">服务与 adb root 状态</td></tr>
+    <tr><td style="padding:5px 0;color:#374151;white-space:nowrap"><code>GET /queue?limit=N</code></td><td style="color:#6b7280">最近播放队列（取链用的缓存）</td></tr>
+    <tr><td style="padding:5px 0;color:#374151;white-space:nowrap"><code>GET /track/&lt;id&gt;</code></td><td style="color:#6b7280">取某个 trackId 的直链；<code>?fast=1</code> 只查缓存不驱动 App</td></tr>
+  </table>
+  <div style="margin-top:12px"><a href="/health" style="color:#2563eb;font-size:13px">测试 /health</a>
+  &nbsp;·&nbsp;<a href="/queue?limit=3" style="color:#2563eb;font-size:13px">测试 /queue</a></div>
+</div>
+</body></html>""" % (color, badge, panel, host)
 
 
 def _keepalive_loop(interval=120):
