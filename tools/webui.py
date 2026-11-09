@@ -481,11 +481,30 @@ function sendText(){
   const v = $('txt').value; if(!v) return;
   fetch('/text?s='+encodeURIComponent(v)).then(r=>r.text()).then(t=>{ $('advStatus').textContent=t; $('txt').value=''; });
 }
-$('scr').addEventListener('click', e=>{
+// 画面坐标换算：图片显示尺寸 -> 设备像素
+function toDev(ev){
   const im = $('scr'), r = im.getBoundingClientRect();
-  const x = Math.round((e.clientX-r.left)*im.naturalWidth/r.width);
-  const y = Math.round((e.clientY-r.top)*im.naturalHeight/r.height);
-  fetch('/tap?x='+x+'&y='+y).then(r=>r.text()).then(()=>{ $('advStatus').textContent='点击 '+x+','+y; setTimeout(refreshScreen,500); });
+  return [Math.round((ev.clientX-r.left)*im.naturalWidth/r.width),
+          Math.round((ev.clientY-r.top)*im.naturalHeight/r.height)];
+}
+let dragFrom=null, dragged=false;
+$('scr').addEventListener('mousedown', e=>{ dragFrom = toDev(e); dragged = false; });
+$('scr').addEventListener('mousemove', e=>{
+  if(!dragFrom) return;
+  const p = toDev(e);
+  if(Math.abs(p[0]-dragFrom[0])>8 || Math.abs(p[1]-dragFrom[1])>8) dragged = true;
+});
+window.addEventListener('mouseup', e=>{
+  if(!dragFrom) return;
+  const from = dragFrom, to = toDev(e); dragFrom = null;
+  if(!dragged) return;                       // 没拖动就交给 click
+  fetch('/swipe?x1='+from[0]+'&y1='+from[1]+'&x2='+to[0]+'&y2='+to[1])
+    .then(r=>r.text()).then(t=>{ $('advStatus').textContent=t; setTimeout(refreshScreen, 700); });
+});
+$('scr').addEventListener('click', e=>{
+  if(dragged){ dragged=false; return; }      // 拖完的那一下不当作点击
+  const p = toDev(e);
+  fetch('/tap?x='+p[0]+'&y='+p[1]).then(r=>r.text()).then(()=>{ $('advStatus').textContent='点击 '+p[0]+','+p[1]; setTimeout(refreshScreen,500); });
 });
 
 loadSummary();
@@ -600,6 +619,17 @@ class Handler(BaseHTTPRequestHandler):
             if STATE['last_shot']:
                 return self._send(200, STATE['last_shot'], 'image/png')
             return self._send(503, 'no screenshot')
+
+        if p == '/swipe':
+            # 滑块验证要靠拖动：/tap 只按一下拖不动
+            try:
+                x1 = int(q.get('x1', ['0'])[0]); y1 = int(q.get('y1', ['0'])[0])
+                x2 = int(q.get('x2', ['0'])[0]); y2 = int(q.get('y2', ['0'])[0])
+                ms = int(q.get('ms', ['600'])[0])
+            except ValueError:
+                return self._send(400, 'bad coords')
+            adb('shell', 'input', 'swipe', str(x1), str(y1), str(x2), str(y2), str(ms), timeout=30)
+            return self._send(200, 'drag %d,%d -> %d,%d' % (x1, y1, x2, y2))
 
         if p == '/tap':
             try:
