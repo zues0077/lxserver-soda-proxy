@@ -489,7 +489,7 @@ function sendCode(){
         toast('自动过滑块没成功，请手动拖一下');
         loginNote('❌ 自动过滑块没成功。滑块是防机器人的，自动识别只能做到「大概率」。' +
           '<br><b>请在下方的「远程画面」里手动拖一次</b>：按住左下角灰色箭头，把小图拖进缺口松手，' +
-          '只要 3 秒，比自动更稳。拖完画面会自动刷新，再点一次「获取验证码」。', true);
+          '只要 3 秒。拖对松手后 App 会立即发出短信，<b>不需要再点一次按钮</b>。', true);
         const s = $('scr');
         if(s) s.scrollIntoView({behavior:'smooth', block:'center'});
       }
