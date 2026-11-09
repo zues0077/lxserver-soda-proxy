@@ -182,14 +182,23 @@ def app_pid():
 
 
 def ensure_adb_ime():
-    """确保 ADBKeyboard 是当前输入法（切 IME 必须 su，Android 9 直接 ime set 会抛异常）。"""
+    """确保 ADBKeyboard 是当前输入法。
+
+    ⚠️ 必须两步：先 `ime enable` 再 `ime set`。只做 `ime set` 时，如果这个 IME
+    还没被启用，命令会**正常返回**但设置不变，表现就是「输入了但搜索框里没字」——
+    这个坑排查了很久，一定要在最后回读 `default_input_method` 确认。
+    """
     out = shell("settings get secure default_input_method", timeout=15).strip()
     if out == config.ADB_IME:
         return True
+    pkg = config.ADB_IME.split("/")[0]
+    if pkg not in shell("pm list packages", timeout=40):
+        # 没装就装不了（APK 要提前 install 进去），直接判失败，别静默继续
+        return False
     su("ime enable %s" % config.ADB_IME, timeout=20)
     su("ime set %s" % config.ADB_IME, timeout=20)
-    return True
-
+    time.sleep(1.5)
+    return shell("settings get secure default_input_method", timeout=15).strip() == config.ADB_IME
 
 def resumed_activity():
     """当前处于 resumed 状态的 Activity 那一行（拿不到返回 ''）。
