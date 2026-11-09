@@ -61,12 +61,22 @@ def is_root(force=False):
     return _IS_ROOT
 
 
+def _serial():
+    """从 config.adb_args() 里取出 -s 后面的串口（形如 127.0.0.1:5555）。"""
+    a = config.adb_args()
+    return a[a.index("-s") + 1] if "-s" in a and a.index("-s") + 1 < len(a) else ""
+
+
 def ensure_root():
     """确保 adbd 是 root，不是就 `adb root` 一次。
 
     为什么必须有：redroid 容器**每次重启后 adbd 都掉回 shell**（uid=2000），
     这时 `ls /data/data/<pkg>/databases` 直接 Permission denied，
     表现却是「队列未命中」——看着像没缓存，实际是读不到库。
+
+    ⚠️ 走 TCP（adb connect 127.0.0.1:5556）时，`adb root` 会重启 adbd，
+    **连接会直接掉成 device offline**，不重连后续所有命令都失败。
+    所以这里 root 之后必须 reconnect + 等它回来。
     """
     if is_root(force=True):
         return True
@@ -76,6 +86,10 @@ def ensure_root():
         return False
     adb("wait-for-device", timeout=30)
     time.sleep(1.5)
+    serial = _serial()
+    if serial:
+        adb("connect", serial, timeout=20)
+    time.sleep(2.0)
     return is_root(force=True)
 
 
@@ -157,7 +171,7 @@ def resumed_activity():
     return out.strip()
 
 
-def wait_foreground(timeout=110):
+def wait_foreground(timeout=200):
     """等 App 真正到前台。
 
     为什么不能用固定 sleep：RK3566 上冷启动实测 20~90 秒不等（换分辨率、
@@ -173,16 +187,36 @@ def wait_foreground(timeout=110):
     return False
 
 
-def cold_start(timeout=110):
+def cold_start(timeout=200):
     """冷启动到首页，并**确认真的到了前台**。
 
     必须冷启动：App 停在结果页时右上角是「×」而不是搜索图标，
     直接点搜索图标只会清空、不会进搜索页。
+
+    ⚠️ 代价很大：RK3566 上实测 **冷启动要 100 秒上下**（类加载 + 首屏）。
+    所以只有进程不存在时才用它，进程还在就走 warm_or_cold_start 的热路径。
     """
     shell("am force-stop %s" % config.PKG, timeout=25)
     time.sleep(1.5)
     shell("am start -n %s" % config.MAIN_ACTIVITY, timeout=40)
     return wait_foreground(timeout)
+
+
+def warm_start(timeout=45):
+    """进程还在时把 App 拉到前台（不 force-stop）。
+
+    实测冷启动 ~100s、热启动几秒，所以取链这种「几分钟一次」的场景
+    必须尽量走热路径，否则单次请求的时间预算全被冷启动吃掉了。
+    """
+    shell("am start -n %s" % config.MAIN_ACTIVITY, timeout=40)
+    return wait_foreground(timeout)
+
+
+def warm_or_cold_start():
+    """进程在就热启动，不在才冷启动。"""
+    if app_pid():
+        return warm_start()
+    return cold_start()
 
 
 def back(delay=1.2):

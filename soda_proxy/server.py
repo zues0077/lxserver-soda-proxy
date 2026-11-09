@@ -9,6 +9,7 @@
 """
 import json
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -72,6 +73,29 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"ok": False, "error": "unknown path"})
 
 
+def _keepalive_loop(interval=120):
+    """后台保活：保证 App 进程一直在，且停在后台（按 HOME），几乎不耗 CPU。
+
+    为什么必须：RK3566 上汽水 App **冷启动要 100~120 秒**（类加载+首屏），
+    取链请求等不起。常驻后每次只走热启动（几秒）。
+    只在「进程不存在」时才拉起，拉起后立刻 HOME 退到后台
+    （前台软渲染要 200%+ CPU，后台几乎为 0）。
+    """
+    time.sleep(5)                     # 让 web 服务先起来
+    while True:
+        try:
+            if device.app_pid() == 0 and device._DEVICE_LOCK.acquire(blocking=False):
+                try:
+                    if device.cold_start():
+                        device.key(3)     # HOME：退到后台
+                        print("[keepalive] App 已预热并退到后台", flush=True)
+                finally:
+                    device._DEVICE_LOCK.release()
+        except Exception as e:
+            print("[keepalive] %s: %s" % (type(e).__name__, e), flush=True)
+        time.sleep(interval)
+
+
 def serve(host="0.0.0.0", port=18090):
     """启动服务（阻塞）。"""
     # 启动就抢一次 root：容器重启后 adbd 默认掉回 shell，等第一次请求再修会
@@ -80,6 +104,7 @@ def serve(host="0.0.0.0", port=18090):
         device.ensure_root()
     except Exception as e:
         print("[soda-proxy] 启动取 root 失败：%s" % e)
+    threading.Thread(target=_keepalive_loop, name="keepalive", daemon=True).start()
     srv = ThreadingHTTPServer((host, port), Handler)
     print("[soda-proxy] listening on http://%s:%d (root=%s)" % (host, port, device.is_root()))
     srv.serve_forever()

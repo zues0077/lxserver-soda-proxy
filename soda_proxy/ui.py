@@ -255,12 +255,16 @@ def tap_point(pt, delay=1.0):
 
 def open_search_and_type(name, verbose=True):
     """冷启动 → 搜索页 → 输入歌名 → 进结果页。返回是否走完（False = 冷启动就没起来）。"""
-    if not device.cold_start():
+    if not device.warm_or_cold_start():
         if verbose:
-            print("[ui] 冷启动超时，App 没到前台，放弃本次")
+            print("[ui] 冷/热启动超时，App 没到前台，放弃本次")
         return False
     device.ensure_adb_ime()
     size = screen_size()
+
+    # 热启动时 App 可能停在搜索页/结果页，那里右上角是「×」不是放大镜。
+    # 直接点底部的「发现」tab 回首页，比按 BACK 稳（BACK 在首页会直接退出 App）。
+    tap_point(profile_point("HOME_TAB"), delay=2.5)
 
     # 1) 点搜索图标
     nodes = dump_nodes()
