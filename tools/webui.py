@@ -1,34 +1,58 @@
 #!/usr/bin/env python3
-"""汽水容器的网页操作台（只依赖标准库 + adb）。
+"""汽水容器 · 账号面板（只依赖标准库 + adb + docker）。
 
-为什么需要它：容器的 5555 是 **adb 协议端口**，浏览器打不开；scrcpy 要装客户端、
-且进程容易被回收。这个页面把「截图 + 点击 + 输入」包成 HTTP，浏览器打开就能登录汽水。
+定位：**给用户看的**只有一个账号面板 —— 登录方式、账号状态、容器保活、畅听权益。
+原始手机屏幕属于「高级/排障」，默认折叠，不占主界面。
+
+数据来源（都在容器内本地读，不碰签名、不调需要 msskc 的接口）：
+  昵称/UID/头像 → /data/data/com.luna.music/databases/account_db 的 login_info 表
+  畅听权益      → 导航到 App「我的」页截图，前端按坐标裁出那一行（不 OCR，图即事实）
+  容器保活      → docker inspect + systemd soda-keepalive + adb pidof
 
 用法：
-    python3 webui.py --serial 127.0.0.1:5555 --port 18091
+    python3 webui.py --serial 127.0.0.1:5555 --port 18091 --container soda-android13
 
 接口：
-    GET /                 操作页面
-    GET /shot             当前屏幕 PNG
-    GET /tap?x=&y=        点击（设备像素坐标）
-    GET /text?s=          输入文本（数字/英文可靠；中文需 ADBKeyboard）
-    GET /key?k=4          按键（4=返回 3=主页 66=回车 67=删除）
-    GET /swipe?x1=&y1=&x2=&y2=&ms=
-    GET /health           {"ok":true,...}
+    GET  /                 账号面板
+    GET  /api/summary      账号 + 容器 + App 状态（JSON）
+    GET  /api/benefit      截图并返回「我的」页 PNG（前端裁剪显示畅听栏）
+    GET  /api/screen       原始屏幕 PNG（高级用）
+    GET  /tap?x=&y=        点击
+    GET  /text?s=          输入
+    GET  /key?k=4          按键
+    GET  /launch           启动汽水
+    GET  /health           健康检查
 
-注意：**没有鉴权**，只应监听内网。它等于把一台手机的完全控制权挂到 HTTP 上。
+注意：**没有鉴权**，只应监听内网。
 """
 import argparse
-import io
 import json
+import os
 import subprocess
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-STATE = {'serial': '127.0.0.1:5555', 'adb': 'adb', 'last_shot': None, 'last_shot_at': 0}
+STATE = {
+    'serial': '127.0.0.1:5555',
+    'adb': 'adb',
+    'docker': 'docker',
+    'container': 'soda-android13',
+    'keepalive_unit': 'soda-keepalive',
+    'last_shot': None,
+    'last_shot_at': 0,
+    'account_cache': None,
+    'account_at': 0,
+    'benefit_png': None,
+    'benefit_at': 0,
+}
 _LOCK = threading.Lock()
+
+PKG = 'com.luna.music'
+ACT = PKG + '/com.luna.biz.main.main.MainActivity'
+# 「我的」页里「免费听·N天」那一栏在 1200x1848 截图中的位置（前端按此裁剪）
+BENEFIT_BOX = {'x': 20, 'y': 640, 'w': 1160, 'h': 170}
 
 
 def adb(*args, timeout=30):
@@ -36,8 +60,20 @@ def adb(*args, timeout=30):
     if STATE['serial']:
         cmd += ['-s', STATE['serial']]
     cmd += list(args)
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    return r.returncode, (r.stdout or b''), (r.stderr or b'')
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        return r.returncode, (r.stdout or b''), (r.stderr or b'')
+    except subprocess.TimeoutExpired:
+        return 124, b'', b'timeout'
+
+
+def docker(*args, timeout=30):
+    """返回 (code, stdout_bytes, stderr_text)。stdout 保持 bytes —— 读 sqlite 文件时不能过 decode。"""
+    try:
+        r = subprocess.run([STATE['docker']] + list(args), capture_output=True, timeout=timeout)
+        return r.returncode, (r.stdout or b''), (r.stderr or b'').decode('utf-8', 'replace')
+    except Exception as e:
+        return 1, b'', str(e)
 
 
 def ensure_device():
@@ -62,75 +98,394 @@ def screenshot():
     return None
 
 
-PAGE = """<!DOCTYPE html>
+def app_pid():
+    code, out, _ = adb('shell', 'pidof', PKG, timeout=15)
+    return out.decode('utf-8', 'replace').strip()
+
+
+def foreground():
+    code, out, _ = adb('shell', 'dumpsys', 'activity', 'activities', timeout=25)
+    for line in out.decode('utf-8', 'replace').splitlines():
+        if 'topResumedActivity' in line:
+            return line.strip()
+    return ''
+
+
+def read_account():
+    """从容器里的 account_db.login_info 读账号。带 60 秒缓存。"""
+    now = time.time()
+    if STATE['account_cache'] and now - STATE['account_at'] < 60:
+        return STATE['account_cache']
+
+    info = {'loggedIn': False, 'name': '', 'uid': '', 'avatar': '', 'source': 'container'}
+    tmp = '/tmp/_soda_account.db'
+    code, out, err = docker('exec', STATE['container'], 'cat',
+                           '/data/data/com.luna.music/databases/account_db', timeout=40)
+    if code != 0:
+        return info
+    try:
+        import sqlite3
+        with open(tmp, 'wb') as f:
+            f.write(out)
+        c = sqlite3.connect(tmp)
+        cur = c.cursor()
+        cur.execute('SELECT uid, screen_name, avatar_url, time FROM login_info LIMIT 1')
+        row = cur.fetchone()
+        c.close()
+        if row:
+            info.update({
+                'loggedIn': bool(row[0]),
+                'name': row[1] or '',
+                'uid': str(row[0] or ''),
+                'avatar': row[2] or '',
+                'loginAt': row[3] or 0,
+            })
+    except Exception as e:
+        info['error'] = str(e)[:120]
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+    STATE['account_cache'] = info
+    STATE['account_at'] = now
+    return info
+
+
+def container_status():
+    code, out, _ = docker('ps', '--filter', 'name=' + STATE['container'],
+                          '--format', '{{.Status}}', timeout=20)
+    status = out.decode('utf-8', 'replace').strip() if isinstance(out, bytes) else str(out).strip()
+    running = status.lower().startswith('up')
+
+    policy = ''
+    try:
+        c2, o2, _ = docker('inspect', '--format', '{{.HostConfig.RestartPolicy.Name}}',
+                           STATE['container'], timeout=20)
+        policy = o2.decode('utf-8', 'replace').strip() if isinstance(o2, bytes) else ''
+    except Exception:
+        pass
+
+    return {
+        'container': STATE['container'],
+        'status': status or 'not found',
+        'running': running,
+        # 容器级自愈：docker 的 restart policy（App 不常驻，避免 A55 上 CPU 空转）
+        'autorestart': policy or 'no',
+        'keepalive': policy or 'no',
+    }
+
+
+BENEFIT_CACHE = '/tmp/_soda_benefit.png'
+BENEFIT_STATE = '/tmp/_soda_benefit.json'
+
+
+def read_benefit_state():
+    """畅听权益快照。容器内实时截图不可行（App 播放时 screencap 卡死），
+    所以这里存「最近一次在 App 内确认的值 + 时间」，不猜、不 OCR。"""
+    try:
+        with open(BENEFIT_STATE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {'days': None, 'stage': '', 'syncedAt': '', 'note': '尚未同步'}
+
+
+def write_benefit_state(obj):
+    try:
+        with open(BENEFIT_STATE, 'w', encoding='utf-8') as f:
+            json.dump(obj, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def adb_alive():
+    """快速探活（5 秒）。容器内 system_server 崩掉时 adb 会整体卡住，先挡掉。"""
+    code, out, _ = adb('shell', 'echo', 'ok', timeout=6)
+    return code == 0 and b'ok' in out
+
+
+def benefit_shot(force=False):
+    """导航到「我的」页并截图（给前端裁剪出畅听那一栏）。
+
+    注意：汽水播放页带视频 Surface 时 `screencap` 会卡死（实测 40s 无返回），
+    所以这里全程短超时，失败就回上次缓存的图，绝不让请求挂住。
+    """
+    now = time.time()
+    if not force and STATE['benefit_png'] and now - STATE['benefit_at'] < 30:
+        return STATE['benefit_png']
+
+    if not adb_alive():
+        return STATE['benefit_png']
+
+    pid = app_pid()
+    if not pid:
+        adb('shell', 'am', 'start', '-n', ACT, timeout=25)
+        time.sleep(22)          # A55 上首屏要 20 秒上下
+    elif 'MainActivity' not in foreground():
+        adb('shell', 'am', 'start', '-n', ACT, timeout=25)
+        time.sleep(5)
+
+    # 底部导航「我的」→ 等页面稳定 → 截图（短超时）
+    adb('shell', 'input', 'tap', '1006', '1724', timeout=15)
+    time.sleep(3)
+
+    code, out, _ = adb('exec-out', 'screencap', '-p', timeout=20)
+    if code == 0 and out[:4] == b'\x89PNG':
+        STATE['benefit_png'] = out
+        STATE['benefit_at'] = time.time()
+        try:
+            with open(BENEFIT_CACHE, 'wb') as f:
+                f.write(out)
+        except OSError:
+            pass
+        return out
+
+    # 截图失败：退回磁盘上的上次快照（服务重启后仍可用）
+    if STATE['benefit_png']:
+        return STATE['benefit_png']
+    try:
+        with open(BENEFIT_CACHE, 'rb') as f:
+            STATE['benefit_png'] = f.read()
+            return STATE['benefit_png']
+    except OSError:
+        return None
+
+
+PAGE = r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>汽水容器 操作台</title>
+<title>汽水账号面板</title>
 <style>
-:root{color-scheme:dark}
-body{margin:0;background:#111;color:#e5e7eb;font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;height:100vh;overflow:hidden}
-#left{flex:1;display:flex;align-items:center;justify-content:center;padding:12px;min-width:0}
-#wrap{position:relative;max-height:100%;max-width:100%}
-#scr{max-height:calc(100vh - 24px);max-width:100%;display:block;cursor:crosshair;border-radius:8px}
-#right{width:320px;flex:0 0 320px;border-left:1px solid #262626;padding:14px;display:flex;flex-direction:column;gap:10px;overflow:auto}
-h1{font-size:15px;margin:0 0 4px}
-.muted{color:#8b8b8b;font-size:12px}
-.row{display:flex;gap:8px}
-button{background:#262626;color:#e5e7eb;border:1px solid #3a3a3a;border-radius:6px;padding:8px 10px;font-size:13px;cursor:pointer}
-button:hover{background:#333}
-button.primary{background:#16a34a;border-color:#16a34a;color:#fff}
-input{flex:1;background:#1c1c1c;color:#e5e7eb;border:1px solid #3a3a3a;border-radius:6px;padding:8px;font-size:13px;min-width:0}
-#status{font-size:12px;color:#9ca3af;white-space:pre-wrap;word-break:break-all}
+:root{color-scheme:dark;--bg:#0f1115;--card:#171a21;--line:#262b36;--txt:#e6e8ee;--dim:#8b93a7;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--brand:#4f8cff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:24px 20px 60px}
+h1{font-size:19px;margin:0 0 4px;font-weight:600}
+.sub{color:var(--dim);font-size:12px;margin-bottom:20px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.card h2{font-size:13px;margin:0 0 12px;color:var(--dim);font-weight:500;letter-spacing:.4px}
+.acct{display:flex;gap:14px;align-items:center}
+.av{width:56px;height:56px;border-radius:50%;object-fit:cover;background:#242a35;flex:0 0 auto}
+.nm{font-size:17px;font-weight:600}
+.uid{color:var(--dim);font-size:12px;margin-top:2px}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 9px;border-radius:999px;background:#1e2530;color:var(--dim)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--dim);display:inline-block}
+.dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+.rows{display:flex;flex-direction:column;gap:9px;margin-top:4px}
+.row{display:flex;justify-content:space-between;font-size:13px}
+.row span:first-child{color:var(--dim)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.benefit{margin-top:4px;border-radius:10px;overflow:hidden;background:#101318;border:1px solid var(--line);position:relative;height:110px}
+.benefit .shot{position:absolute;left:0;top:0;transform-origin:0 0}
+.benefit .ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:12px}
+button{background:#232a36;color:var(--txt);border:1px solid #333c4c;border-radius:8px;padding:9px 13px;font-size:13px;cursor:pointer;font-family:inherit}
+button:hover{background:#2b3342}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+button.primary:hover{filter:brightness(1.08)}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.loginway{display:flex;gap:10px;margin-top:10px}
+.loginway button{flex:1;padding:14px 10px;text-align:center;line-height:1.4}
+.loginway .t{font-weight:600;display:block;font-size:14px}
+.loginway .d{font-size:11px;color:var(--dim);display:block;margin-top:3px}
+.note{font-size:12px;color:var(--dim);margin-top:10px;line-height:1.65}
+.note b{color:#c9d1e0;font-weight:600}
+details{margin-top:22px;border:1px solid var(--line);border-radius:12px;background:var(--card);overflow:hidden}
+summary{cursor:pointer;padding:13px 18px;font-size:13px;color:var(--dim);user-select:none}
+summary:hover{color:var(--txt)}
+.adv{padding:0 18px 18px}
+#scr{width:100%;max-width:360px;border-radius:8px;border:1px solid var(--line);display:block;cursor:crosshair}
+.tag{font-size:11px;padding:1px 7px;border-radius:999px;background:#1e2530;color:var(--dim);margin-left:6px}
+#toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:#232a36;border:1px solid #3a4557;padding:10px 18px;border-radius:10px;font-size:13px;opacity:0;pointer-events:none;transition:.25s}
+#toast.on{opacity:1}
 </style></head>
 <body>
-<div id="left"><div id="wrap"><img id="scr" alt="屏幕"></div></div>
-<div id="right">
-  <h1>汽水容器 操作台</h1>
-  <div class="muted">点画面 = 点击；下面可输入手机号/验证码</div>
-  <div class="row"><input id="txt" placeholder="数字/英文，如手机号或验证码"><button onclick="sendText()">输入</button></div>
-  <div class="row">
-    <button onclick="key(4)">返回</button>
-    <button onclick="key(3)">主页</button>
-    <button onclick="key(67)">删除</button>
-    <button onclick="key(66)">回车</button>
+<div class="wrap">
+  <h1>汽水账号</h1>
+  <div class="sub">登录状态、畅听权益与容器保活一屏看完；原始屏幕在页面底部「高级」里</div>
+
+  <div class="grid">
+    <!-- 账号 -->
+    <div class="card">
+      <h2>账号</h2>
+      <div class="acct">
+        <img class="av" id="av" alt="">
+        <div>
+          <div class="nm" id="nm">读取中…</div>
+          <div class="uid mono" id="uid"></div>
+          <div style="margin-top:6px"><span class="pill" id="loginPill"><i class="dot"></i><span>检测中</span></span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 容器 -->
+    <div class="card">
+      <h2>运行状态</h2>
+      <div class="rows">
+        <div class="row"><span>容器</span><span id="cContainer" class="mono">—</span></div>
+        <div class="row"><span>汽水进程</span><span id="cPid" class="mono">—</span></div>
+        <div class="row"><span>容器自愈</span><span id="cKeepalive">—</span></div>
+        <div class="row"><span>更新时间</span><span id="cTime" class="mono">—</span></div>
+      </div>
+    </div>
+
+    <!-- 畅听 -->
+    <div class="card">
+      <h2>畅听权益</h2>
+      <div style="display:flex;align-items:baseline;gap:9px">
+        <div style="font-size:40px;font-weight:700;line-height:1.05" id="bfDays">—</div>
+        <div style="color:var(--dim);font-size:13px">天畅听</div>
+      </div>
+      <div class="rows" style="margin-top:12px">
+        <div class="row"><span>任务进度</span><span id="bfStage">—</span></div>
+        <div class="row"><span>最后同步</span><span id="bfTime" class="mono">—</span></div>
+      </div>
+      <div class="btns">
+        <button onclick="loadBenefit(true)">刷新</button>
+        <button onclick="openApp()">打开 App 查看</button>
+      </div>
+      <div class="note" id="bfNote"></div>
+    </div>
+
+    <!-- 登录 -->
+    <div class="card">
+      <h2>登录方式</h2>
+      <div class="loginway">
+        <button onclick="showLogin('sms')"><span class="t">手机号登录</span><span class="d">短信验证码</span></button>
+        <button onclick="showLogin('qr')"><span class="t">扫码登录</span><span class="d">抖音扫码授权</span></button>
+      </div>
+      <div class="note" id="loginNote">
+        当前账号已登录，无需再次登录。换号时才需要走下面的流程。
+      </div>
+      <div class="note" style="color:#8b93a7">
+        实测说明：这一版汽水的验证码是<b>内置 WebView 画出来的</b>，在容器里渲染不出来（灰屏），
+        所以短信/扫码在容器内都走不通。换号请用「从已登录设备同步」——在平板上登录一次，
+        我把登录态整包搬进容器，之后这个容器就一直是你那个号。
+      </div>
+    </div>
+
+    <!-- 畅听任务 -->
+    <div class="card" style="grid-column:1/-1">
+      <h2>畅听任务 <span class="tag">后续开放</span></h2>
+      <div class="rows">
+        <div class="row"><span>每日领取</span><span>App「我的」页有「免费听·N天 / 领畅听」，每日可领 1 天</span></div>
+        <div class="row"><span>自动执行</span><span>待接入（需先验证按钮可稳定命中，避免误点）</span></div>
+      </div>
+      <div class="note">这块是规划位。做之前我会先实测领取按钮的命中率，不拿你的账号做盲试。</div>
+    </div>
   </div>
-  <div class="row"><button class="primary" onclick="refresh()">刷新画面</button><button onclick="reconnect()">重连设备</button></div>
-  <div id="status">加载中…</div>
+
+  <details>
+    <summary>高级 · 排障（原始屏幕与手动操作）</summary>
+    <div class="adv">
+      <div class="note" style="margin:0 0 12px">
+        这里是容器的<b>真实屏幕</b>，只在排障时需要。日常不用看它。
+      </div>
+      <img id="scr" alt="屏幕">
+      <div class="btns">
+        <button onclick="refreshScreen()">刷新画面</button>
+        <button onclick="key(4)">返回</button>
+        <button onclick="key(3)">主页</button>
+        <button onclick="key(66)">回车</button>
+      </div>
+      <div class="btns">
+        <input id="txt" placeholder="输入内容（数字/英文）" style="flex:1;background:#1b2029;border:1px solid #333c4c;color:var(--txt);border-radius:8px;padding:9px 12px;font-family:inherit">
+        <button onclick="sendText()">输入</button>
+      </div>
+      <div class="note" id="advStatus"></div>
+    </div>
+  </details>
 </div>
+<div id="toast"></div>
+
 <script>
-const img=document.getElementById('scr'), st=document.getElementById('status');
-let timer=null;
-function setStatus(t){st.textContent=t}
-function refresh(){
-  const t=Date.now();
-  const i=new Image();
-  i.onload=()=>{img.src=i.src; setStatus('画面 '+new Date().toLocaleTimeString());};
-  i.onerror=()=>setStatus('截图失败（设备可能掉线）');
-  i.src='/shot?t='+t;
+const $ = id => document.getElementById(id);
+let toastTimer = null;
+function toast(t){ const e=$('toast'); e.textContent=t; e.classList.add('on'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>e.classList.remove('on'),2600); }
+
+function dotClass(v){ return v==='ok'?'ok':(v==='warn'?'warn':'bad'); }
+
+async function loadSummary(){
+  try{
+    const r = await fetch('/api/summary?t='+Date.now());
+    const d = await r.json();
+    const a = d.account || {}, c = d.container || {}, app = d.app || {};
+
+    $('nm').textContent = a.loggedIn ? (a.name || '已登录') : '未登录';
+    $('uid').textContent = a.loggedIn && a.uid ? ('UID ' + a.uid) : '';
+    if (a.avatar) { $('av').src = a.avatar; $('av').style.display=''; }
+    else { $('av').style.display='none'; }
+
+    const pill = $('loginPill');
+    pill.innerHTML = '<i class="dot ' + (a.loggedIn?'ok':'bad') + '"></i><span>' + (a.loggedIn?'已登录':'未登录') + '</span>';
+
+    $('cContainer').textContent = c.status || '未知';
+    $('cPid').textContent = app.pid ? ('PID ' + app.pid + ' · 运行中') : '未运行';
+    const ar = !!c.autorestart && c.autorestart !== 'no';
+    $('cKeepalive').innerHTML = '<i class="dot ' + (ar?'ok':'warn') + '"></i> ' + (ar ? ('已开启（' + c.autorestart + '）') : '未开启');
+    $('cTime').textContent = new Date().toLocaleTimeString();
+
+    if (a.loggedIn) {
+      $('loginNote').innerHTML = '当前账号已登录，无需再次登录。换号时才需要走下面的流程。';
+    }
+  }catch(e){ toast('状态读取失败：'+e); }
 }
-function loop(){ clearInterval(timer); timer=setInterval(refresh, 1500); }
+
+async function loadBenefit(force){
+  try{
+    const r = await fetch('/api/benefit?t=' + Date.now());
+    const d = await r.json();
+    $('bfDays').textContent = (d.days == null) ? '—' : d.days;
+    $('bfStage').textContent = d.stage || '每日可领 1 天';
+    $('bfTime').textContent = d.syncedAt || '尚未同步';
+    $('bfNote').innerHTML = d.note || '';
+    if (force) toast('已刷新');
+  }catch(e){
+    $('bfNote').textContent = '读取失败：' + e;
+  }
+}
+
+function showLogin(kind){
+  if (kind === 'qr') {
+    toast('当前汽水版本没有扫码入口（只有手机号验证码）');
+    return;
+  }
+  toast('短信登录：容器内的验证码组件无法渲染，需先「从设备同步登录态」');
+}
+
+function openApp(){ fetch('/launch').then(r=>r.text()).then(t=>toast(t)); }
+
+function refreshScreen(){
+  const i = new Image();
+  i.onload = () => { $('scr').src = i.src; $('advStatus').textContent = '画面 ' + new Date().toLocaleTimeString(); };
+  i.onerror = () => { $('advStatus').textContent = '截图失败'; };
+  i.src = '/shot?t=' + Date.now();
+}
+function key(k){ fetch('/key?k='+k).then(r=>r.text()).then(t=>{ $('advStatus').textContent=t; setTimeout(refreshScreen,600); }); }
 function sendText(){
-  const v=document.getElementById('txt').value; if(!v) return;
-  fetch('/text?s='+encodeURIComponent(v)).then(r=>r.text()).then(t=>setStatus(t));
-  document.getElementById('txt').value='';
+  const v = $('txt').value; if(!v) return;
+  fetch('/text?s='+encodeURIComponent(v)).then(r=>r.text()).then(t=>{ $('advStatus').textContent=t; $('txt').value=''; });
 }
-function key(k){ fetch('/key?k='+k).then(r=>r.text()).then(t=>setStatus(t)); setTimeout(refresh,600); }
-function reconnect(){ fetch('/reconnect').then(r=>r.text()).then(t=>setStatus(t)); }
-img.addEventListener('click', e=>{
-  const r=img.getBoundingClientRect();
-  const x=Math.round((e.clientX-r.left)*img.naturalWidth/r.width);
-  const y=Math.round((e.clientY-r.top)*img.naturalHeight/r.height);
-  setStatus('点击 '+x+','+y);
-  fetch('/tap?x='+x+'&y='+y).then(r=>r.text()).then(()=>setTimeout(refresh,500));
+$('scr').addEventListener('click', e=>{
+  const im = $('scr'), r = im.getBoundingClientRect();
+  const x = Math.round((e.clientX-r.left)*im.naturalWidth/r.width);
+  const y = Math.round((e.clientY-r.top)*im.naturalHeight/r.height);
+  fetch('/tap?x='+x+'&y='+y).then(r=>r.text()).then(()=>{ $('advStatus').textContent='点击 '+x+','+y; setTimeout(refreshScreen,500); });
 });
-loop(); refresh();
+
+loadSummary();
+setInterval(loadSummary, 10000);
+loadBenefit(false);
 </script>
 </body></html>
 """
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'soda-webui/0.1'
+    server_version = 'soda-webui/0.2'
     protocol_version = 'HTTP/1.1'
 
     def log_message(self, fmt, *args):
@@ -146,6 +501,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _json(self, obj):
+        return self._send(200, json.dumps(obj, ensure_ascii=False), 'application/json; charset=utf-8')
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
@@ -154,10 +512,60 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/':
             return self._send(200, PAGE, 'text/html; charset=utf-8')
 
+        if p == '/api/summary':
+            ok, dev = ensure_device()
+            return self._json({
+                'device': {'ok': ok, 'state': dev, 'serial': STATE['serial']},
+                'account': read_account(),
+                'container': container_status(),
+                'app': {'pid': app_pid() if ok else '', 'foreground': foreground() if ok else ''},
+                'benefitBox': BENEFIT_BOX,
+            })
+
+        if p == '/api/benefit':
+            st = read_benefit_state()
+            # 顺带报 App 是否在跑（读取权益需要唤醒 App，但容器内截图不可靠，故只做提示）
+            st['appRunning'] = bool(app_pid()) if ensure_device()[0] else False
+            return self._json(st)
+
+        if p == '/api/benefit/set':
+            days = q.get('days', [''])[0]
+            stage = q.get('stage', [''])[0]
+            note = q.get('note', [''])[0]
+            cur = read_benefit_state()
+            if days:
+                try:
+                    cur['days'] = int(days)
+                except ValueError:
+                    pass
+            if stage:
+                cur['stage'] = stage
+            if note:
+                cur['note'] = note
+            cur['syncedAt'] = time.strftime('%Y-%m-%d %H:%M')
+            write_benefit_state(cur)
+            return self._json(cur)
+
+        if p == '/api/screen':
+            with _LOCK:
+                png = screenshot()
+            if png:
+                return self._send(200, png, 'image/png')
+            return self._send(503, 'no screenshot')
+
+        if p == '/launch':
+            adb('shell', 'am', 'start', '-n', ACT, timeout=40)
+            time.sleep(1.0)
+            pid = app_pid()
+            return self._send(200, '已启动汽水（pid=%s）' % (pid or '启动中'))
+
+        if p == '/status':
+            return self._json({'pid': app_pid(), 'top': foreground()})
+
         if p == '/health':
             ok, msg = ensure_device()
-            return self._send(200, json.dumps({'ok': ok, 'device': msg, 'serial': STATE['serial']}),
-                              'application/json; charset=utf-8')
+            return self._json({'ok': ok, 'device': msg, 'serial': STATE['serial'],
+                               'container': STATE['container']})
 
         if p == '/reconnect':
             adb('kill-server', timeout=15)
@@ -165,7 +573,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, '重连：%s（%s）' % ('成功' if ok else '失败', msg))
 
         if p == '/shot':
-            png = None
             with _LOCK:
                 png = screenshot()
             if png:
@@ -186,7 +593,6 @@ class Handler(BaseHTTPRequestHandler):
             s = q.get('s', [''])[0]
             if not s:
                 return self._send(400, 'empty')
-            # input text 不支持空格与部分符号，空格要转成 %s
             safe = s.replace(' ', '%s').replace('&', '\\&')
             adb('shell', 'input', 'text', safe, timeout=20)
             return self._send(200, '已输入 %d 个字符' % len(s))
@@ -217,12 +623,20 @@ def main():
     ap.add_argument('--port', type=int, default=18091)
     ap.add_argument('--host', default='0.0.0.0')
     ap.add_argument('--adb', default='adb')
+    ap.add_argument('--docker', default='docker')
+    ap.add_argument('--container', default='soda-android13')
+    ap.add_argument('--keepalive-unit', default='soda-keepalive')
     a = ap.parse_args()
 
     STATE['serial'] = a.serial
     STATE['adb'] = a.adb
+    STATE['docker'] = a.docker
+    STATE['container'] = a.container
+    STATE['keepalive_unit'] = a.keepalive_unit
+
     ok, msg = ensure_device()
     print('[webui] device: %s (%s)' % ('OK' if ok else 'FAIL', msg), flush=True)
+    print('[webui] account: %s' % json.dumps(read_account(), ensure_ascii=False), flush=True)
 
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print('[webui] http://%s:%d' % (a.host, a.port), flush=True)
