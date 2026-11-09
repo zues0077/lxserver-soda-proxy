@@ -14,7 +14,10 @@ android.widget.TextView{1c84975 VFED..C.. ......I. 0,0-0,0 #7f070014 app:id/sear
 ```
 
 - `{` 后面是 8~9 位 flag，其中 **`C` = clickable、`L` = long-clickable**
-- 中间的 `l,t-r,b` 是这个 View 在屏幕上的 bounds
+- 中间的 `l,t-r,b` 是 bounds，**注意是相对父容器的**（dumpsys 打的是 mLeft/mTop，
+  不含 translation/scroll 偏移）。顶部标题栏那种父容器在 (0,0) 的，local≈absolute；
+  但底栏这类用 translationY 移上去的，local 全是 0,x-…，**不能当屏幕坐标用来点**。
+  底栏/悬浮元素一律用截图量坐标，不要信 dump。
 - 末尾 `#7f... app:id/xxx` 是资源 id（汽水的 id 基本被混淆成 `ho1`/`hky`，只能按类名+位置找）
 
 ## 定位策略

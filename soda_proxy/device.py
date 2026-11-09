@@ -20,12 +20,18 @@ def shell(cmd, timeout=60):
     A55 这类弱 CPU 上 `input keyevent` 单次可能卡到 20 秒以上（每次都要拉起
     app_process）。这里把超时当空输出处理，不让整条流程因为一个按键挂掉。
     """
-    args = config.adb_args() + ["shell", cmd]
-    try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-        return (r.stdout or "") + (r.stderr or "")
-    except subprocess.TimeoutExpired:
-        return ""
+    def _run():
+        args = config.adb_args() + ["shell", cmd]
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+            return (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired:
+            return ""
+
+    out = _run()
+    if _looks_offline(out) and reconnect():
+        out = _run()
+    return out
 
 
 def adb(*args, timeout=30):
@@ -59,6 +65,33 @@ def is_root(force=False):
         _IS_ROOT = False
     _ROOT_AT = now
     return _IS_ROOT
+
+
+_OFFLINE_HINTS = ("device offline", "error: closed", "no devices", "device not found",
+                  "error: device", "connection reset")
+
+
+def _looks_offline(out):
+    low = (out or "").lower()
+    return any(h in low for h in _OFFLINE_HINTS)
+
+
+def reconnect():
+    """断开并重连 adb 串口。
+
+    容器化后 adb 走 TCP（host.docker.internal:5555），`adb root` 重启 adbd、
+    容器重启、网络抖动都会让连接掉成 `device offline`。
+    掉了以后 `pidof` 返回空、dump 返回 0 个节点，表现成「App 没在跑 / 找不到控件」，
+    极容易误判。这里统一做一次重连。
+    """
+    s = _serial()
+    if not s:
+        return False
+    adb("disconnect", s, timeout=15)
+    time.sleep(0.5)
+    adb("connect", s, timeout=20)
+    time.sleep(1.5)
+    return True
 
 
 def _serial():
