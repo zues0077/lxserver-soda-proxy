@@ -15,10 +15,17 @@ _DEVICE_LOCK = threading.Lock()
 
 
 def shell(cmd, timeout=60):
-    """在设备上执行 shell 命令（自动带 -s）。"""
+    """在设备上执行 shell 命令（自动带 -s）。
+
+    A55 这类弱 CPU 上 `input keyevent` 单次可能卡到 20 秒以上（每次都要拉起
+    app_process）。这里把超时当空输出处理，不让整条流程因为一个按键挂掉。
+    """
     args = config.adb_args() + ["shell", cmd]
-    r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-    return (r.stdout or "") + (r.stderr or "")
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or "") + (r.stderr or "")
+    except subprocess.TimeoutExpired:
+        return ""
 
 
 _IS_ROOT = None
@@ -57,14 +64,14 @@ def tap(x, y, delay=1.0):
     time.sleep(delay)
 
 
-def key(code, delay=0.6):
-    shell("input keyevent %d" % code, timeout=20)
+def key(code, delay=0.6, timeout=20):
+    shell("input keyevent %d" % code, timeout=timeout)
     time.sleep(delay)
 
 
 def input_text(text):
     """通过 ADBKeyboard 输入（含中文）。"""
-    shell("am broadcast -a ADB_INPUT_TEXT --es msg '%s'" % text.replace("'", ""), timeout=20)
+    shell("am broadcast -a ADB_INPUT_TEXT --es msg '%s'" % text.replace("'", ""), timeout=30)
     time.sleep(1.2)
 
 
@@ -97,21 +104,24 @@ def cold_start():
     必须冷启动：App 停在结果页时右上角是「×」而不是搜索图标，
     点 (1150,70) 只会清空、不会进搜索页。
     """
-    shell("am force-stop %s" % config.PKG, timeout=20)
-    time.sleep(1.5)
-    shell("am start -n %s" % config.MAIN_ACTIVITY, timeout=30)
-    time.sleep(9)
+    shell("am force-stop %s" % config.PKG, timeout=25)
+    time.sleep(2)
+    shell("am start -n %s" % config.MAIN_ACTIVITY, timeout=40)
+    # 弱 CPU（RK3566/A55）首屏要 20 秒上下；等不够会点到「×」而不是搜索图标
+    time.sleep(20)
 
 
 def open_search_and_type(name):
     """冷启动 → 搜索页 → 输入歌名 → 点第一条联想进结果页。"""
     cold_start()
-    tap(*config.SEARCH_ICON, delay=2.5)
-    tap(*config.SEARCH_BOX, delay=1.5)
-    for _ in range(20):
-        key(67, 0.03)          # DEL 清空历史内容
+    tap(*config.SEARCH_ICON, delay=3.0)
+    tap(*config.SEARCH_BOX, delay=2.0)
+    # 冷启动后搜索框本来是空的，清空只是兜底。原来 20 次 keyevent 在 A55 上
+    # 单次就能卡 20 秒，直接把整条流程拖死 —— 降到 3 次并收紧超时。
+    for _ in range(3):
+        key(67, 0.05, timeout=8)
     input_text(name)
-    tap(*config.SUGGEST_FIRST, delay=4.0)
+    tap(*config.SUGGEST_FIRST, delay=5.0)
 
 
 def click_results(max_per_layout=3):
