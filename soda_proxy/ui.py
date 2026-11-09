@@ -58,6 +58,12 @@ def _pick_section(text):
             picked = sec
     if picked is None:
         picked = lines[idxs[-1]:]      # 没匹配上就取最后一段（最顶层窗口）
+    # 最后一段还是桌面（Launcher）→ 说明这次 dump 没覆盖到目标 App。
+    # 必须当成「没拿到」返回空，否则调用方会把桌面的搜索框当成 App 的搜索图标，
+    # 点上去毫无反应还查不出原因（这条踩过）。
+    head = picked[1] if len(picked) > 1 else ""
+    if "Launcher" in head or "DecorView@" not in head:
+        return ""
     return "\n".join(picked)
 
 
@@ -134,6 +140,9 @@ def search_entry(nodes, size):
         if x1 < w * 0.60:            # 只在右侧
             continue
         if n["w"] > w * 0.35 or n["h"] < h * 0.035 or n["h"] > h * 0.12:
+            continue
+        # 桌面 launcher 的搜索控件也长在右上角，必须排掉
+        if "Launcher" in n["cls"] or "DoubleShadow" in n["cls"] or "launcher" in n["rid"]:
             continue
         key = (x2, n["area"])        # 越贴右边越好；同位置取大的
         if best_key is None or key > best_key:

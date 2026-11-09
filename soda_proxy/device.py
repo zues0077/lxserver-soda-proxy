@@ -145,8 +145,15 @@ def ensure_adb_ime():
 
 
 def resumed_activity():
-    """当前处于 resumed 状态的 Activity 那一行（拿不到返回 ''）。"""
-    out = shell("dumpsys activity activities | grep -m1 mResumedActivity", timeout=25)
+    """当前处于 resumed 状态的 Activity 那一行（拿不到返回 ''）。
+
+    ⚠️ Android 10+ 里这个字段叫 `topResumedActivity`，`mResumedActivity` 已经不再输出。
+    只 grep 旧名字会**永远拿到空行**，于是「App 明明起来了却被判成没起来」——
+    这条在 720p 容器上浪费了一整轮排查（改成看 `dumpsys activity top | head -2`
+    更糟：它列的第一个 TASK 是桌面，不代表桌面在前台）。
+    """
+    out = shell("dumpsys activity activities | grep -m1 -E 'topResumedActivity|mResumedActivity'",
+                timeout=25)
     return out.strip()
 
 
