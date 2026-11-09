@@ -450,14 +450,22 @@ async function loadBenefit(force){
 }
 
 function showLogin(kind){
+  const n = $('loginNote');
   if (kind === 'qr') {
     toast('这一版汽水没有扫码入口（只有手机号验证码）');
+    if (n) n.textContent = '这一版汽水没有扫码入口，只能用手机号 + 短信验证码登录。';
     return;
   }
-  fetch('/login/open').then(r=>r.text()).then(t=>{
+  // 反馈要看得见：toast 2.6 秒就消失，画面又在页面底部，
+  // 所以这里同时写 loginNote 并自动滚到远程画面。
+  if (n) n.textContent = '正在把 App 切到登录页…';
+  fetch('/login/open?t='+Date.now()).then(r=>r.text()).then(t=>{
     toast(t);
-    setTimeout(refreshScreen, 1200);
-  });
+    if (n) n.textContent = t;
+    setTimeout(refreshScreen, 800);
+    const s = $('scr');
+    if (s) s.scrollIntoView({behavior:'smooth', block:'center'});
+  }).catch(e=>{ if (n) n.textContent = '调用失败：' + e; });
 }
 
 function openApp(){ fetch('/launch').then(r=>r.text()).then(t=>toast(t)); }
